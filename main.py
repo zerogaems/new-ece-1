@@ -26,7 +26,7 @@ BOT_TOKEN = os.environ.get(
     'BOT_TOKEN', 'ضع_التوكن_هنا_إن_لم_تستخدم_متغيرات_البيئة'
 )
 ADMIN_CHANNEL_ID = int(
-    os.environ.get('ADMIN_CHANNEL_ID', '-5340670153')
+    os.environ.get('ADMIN_CHANNEL_ID', '-1003960991388')
 )  # ID قناة الأدمن للتحقق
 ADMIN_ID = int(
     os.environ.get('ADMIN_ID', '7547218555')
