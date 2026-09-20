@@ -26,17 +26,17 @@ BOT_TOKEN = os.environ.get(
     'BOT_TOKEN', 'ضع_التوكن_هنا_إن_لم_تستخدم_متغيرات_البيئة'
 )
 ADMIN_CHANNEL_ID = int(
-    os.environ.get('ADMIN_CHANNEL_ID', '-1001234567890')
+    os.environ.get('ADMIN_CHANNEL_ID', '-5340670153')
 )  # ID قناة الأدمن للتحقق
 ADMIN_ID = int(
-    os.environ.get('ADMIN_ID', '123456789')
+    os.environ.get('ADMIN_ID', '7547218555')
 )  # Telegram ID الخاص بك كأدمن
 
 FRESHMAN_LECTURES_ID = int(
-    os.environ.get('FRESHMAN_LECTURES_ID', '-1001111111111')
+    os.environ.get('FRESHMAN_LECTURES_ID', '-1004413316628')
 )
 FRESHMAN_DISCUSSION_ID = int(
-    os.environ.get('FRESHMAN_DISCUSSION_ID', '-1002222222222')
+    os.environ.get('FRESHMAN_DISCUSSION_ID', '-1003953300954')
 )
 
 bot = telebot.TeleBot(BOT_TOKEN)
