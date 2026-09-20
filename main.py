@@ -34,7 +34,7 @@ FRESHMAN_LECTURES_ID = int(
     os.environ.get('FRESHMAN_LECTURES_ID', '-1004413316628')
 )
 FRESHMAN_DISCUSSION_ID = int(
-    os.environ.get('FRESHMAN_DISCUSSION_ID', '--1003953300954')
+    os.environ.get('FRESHMAN_DISCUSSION_ID', '-1003953300954')
 )
 
 bot = telebot.TeleBot(BOT_TOKEN)
