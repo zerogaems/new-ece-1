@@ -13,7 +13,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-  return 'Freshman Bot is 100% Secure & Live on Render!'
+  return 'Freshman Verification Bot - Admin Direct Delivery Active!'
 
 
 def run_flask():
@@ -25,18 +25,18 @@ def run_flask():
 BOT_TOKEN = os.environ.get(
     'BOT_TOKEN', 'ضع_التوكن_هنا_إن_لم_تستخدم_متغيرات_البيئة'
 )
-ADMIN_CHANNEL_ID = int(
-    os.environ.get('ADMIN_CHANNEL_ID', '-1003960991388')
-)  # ID قناة الأدمن للتحقق
 ADMIN_ID = int(
-    os.environ.get('ADMIN_ID', '7547218555')
-)  # Telegram ID الخاص بك كأدمن
+    os.environ.get('ADMIN_ID', '123456789')
+)  # Telegram ID الخاص بك كأدمن رئيسي
+
+# ID المجموعة أو القناة (اختياري، إن لم يوجد سيرسل للأدمن مباشرة)
+ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID', '')
 
 FRESHMAN_LECTURES_ID = int(
-    os.environ.get('FRESHMAN_LECTURES_ID', '-1004413316628')
+    os.environ.get('FRESHMAN_LECTURES_ID', '-1001111111111')
 )
 FRESHMAN_DISCUSSION_ID = int(
-    os.environ.get('FRESHMAN_DISCUSSION_ID', '-1003953300954')
+    os.environ.get('FRESHMAN_DISCUSSION_ID', '-1002222222222')
 )
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -167,7 +167,6 @@ def handle_phone(message):
 
   user_id = message.from_user.id
 
-  # حماية ضد الأرقام الوهمية (تأكد أن الكرت المرسل يخص صاحب الحساب نفسه)
   if message.contact.user_id != user_id:
     bot.send_message(
         message.chat.id,
@@ -192,7 +191,7 @@ def handle_phone(message):
   )
 
 
-# ==================== استقبال الصور والإنهاء ====================
+# ==================== استقبال الصور والإنهاء وإرسالها للأدمن مباشرة ====================
 @bot.message_handler(
     content_types=['photo'],
     func=lambda msg: msg.from_user.id in user_sessions
@@ -226,6 +225,7 @@ def handle_id_photo(message):
   phone = user_data['phone']
   admission_photo_id = user_data['admission_photo']
 
+  # 1. حفظ الطلب في قاعدة البيانات أولاً
   conn = sqlite3.connect('freshmen_students.db')
   cursor = conn.cursor()
   cursor.execute(
@@ -239,51 +239,74 @@ def handle_id_photo(message):
   conn.commit()
   conn.close()
 
-  media = [
-      types.InputMediaPhoto(
-          admission_photo_id,
-          caption=(
-              f'📥 **طلب توثيق مستجد جديد:**\n\n'
-              f'👤 **الاسم الثلاثي:** {full_name}\n'
-              f'📱 **رقم الهاتف:** `{phone}`\n'
-              f'🆔 **Telegram ID:** `{user_id}`\n'
-              f'👤 **المعرف:** @{message.from_user.username if message.from_user.username else "لا يوجد"}'
-          ),
-          parse_mode='Markdown',
-      ),
-      types.InputMediaPhoto(photo_id),
-  ]
-
-  bot.send_media_group(ADMIN_CHANNEL_ID, media)
-
-  markup = types.InlineKeyboardMarkup(row_width=2)
-  btn_approve = types.InlineKeyboardButton(
-      text='✅ قبول وتوليد الرابط', callback_data=f'approve_{user_id}'
-  )
-  btn_reject = types.InlineKeyboardButton(
-      text='❌ رفض الطلب', callback_data=f'reject_menu_{user_id}'
-  )
-  markup.add(btn_approve, btn_reject)
-
-  bot.send_message(
-      ADMIN_CHANNEL_ID,
-      f'📌 **قرار الطلب الخاص بالطالب:** {full_name} (`{phone}`)',
-      reply_markup=markup,
-      parse_mode='Markdown',
-  )
-
+  # 2. إعلام الطالب بالاستلام فوراً
   bot.send_message(
       message.chat.id,
-      '🚀 **تم استلام بياناتك ورقم هاتفك بنجاح!**\n\n'
+      '🚀 **تم استلام بياناتك وأوراقك بنجاح!**\n\n'
       'طلبك الآن قيد المراجعة والتدقيق من قبل أعضاء الهيئة، وسيصلك إشعار بالقبول'
       ' مع روابط القنوات هنا فور إتمام المراجعة.',
       parse_mode='Markdown',
   )
 
-  del user_sessions[user_id]
+  # تحديد الوجهة: إن وجدت قناة أدمن يرسل إليها، وإلا يرسل لمحادثة الأدمن المباشرة (ADMIN_ID)
+  target_chat_id = ADMIN_ID
+  if ADMIN_CHANNEL_ID and ADMIN_CHANNEL_ID.strip():
+    try:
+      target_chat_id = int(ADMIN_CHANNEL_ID)
+    except ValueError:
+      target_chat_id = ADMIN_ID
+
+  # 3. إرسال أوراق الطالب بشكل منفصل ومضمون 100% دون التعرض لمشاكل الألبومات
+  try:
+    # إرسال الصورة الأولى (المفاضلة)
+    bot.send_photo(
+        target_chat_id,
+        admission_photo_id,
+        caption=(
+            f'📥 **طلب توثيق مستجد جديد (1/2 - صورة المفاضلة):**\n\n'
+            f'👤 **الاسم:** {full_name}\n'
+            f'📱 **الهاتف:** `{phone}`\n'
+            f'🆔 **Telegram ID:** `{user_id}`\n'
+            f'👤 **المعرف:** @{message.from_user.username if message.from_user.username else "لا يوجد"}'
+        ),
+        parse_mode='Markdown',
+    )
+
+    # إرسال الصورة الثانية (الهوية) مع الأزرار تحتها مباشرة
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_approve = types.InlineKeyboardButton(
+        text='✅ قبول وتوليد الرابط', callback_data=f'approve_{user_id}'
+    )
+    btn_reject = types.InlineKeyboardButton(
+        text='❌ رفض الطلب', callback_data=f'reject_menu_{user_id}'
+    )
+    markup.add(btn_approve, btn_reject)
+
+    bot.send_photo(
+        target_chat_id,
+        photo_id,
+        caption=(
+            f'🪪 **(2/2 - صورة الهوية) للطالب:** {full_name}\n👇 **اختر القرار'
+            ' للطلب:**'
+        ),
+        reply_markup=markup,
+    )
+
+  except Exception as e:
+    # في حال حدوث أي خطأ، يضمن البوت الإرسال لشات الأدمن الشخصي كـ Fallback
+    bot.send_message(
+        ADMIN_ID,
+        f'⚠️ **وصلك طلب مستجد جديد من ({full_name} - {phone}):**\n\n'
+        f'حدث خطأ في الإرسال للمجموعة، يمكنك قبول الطالب عبر الأمر:\n`/approve_manual'
+        f' {user_id}`',
+        parse_mode='Markdown',
+    )
+
+  if user_id in user_sessions:
+    del user_sessions[user_id]
 
 
-# ==================== التعامل مع قرارات الأدمن والأزرار ====================
+# ==================== التعامل مع قرارات الأدمن ====================
 @bot.callback_query_handler(
     func=lambda call: call.data.startswith(
         ('approve_', 'reject_', 'retry_freshman')
@@ -292,7 +315,6 @@ def handle_id_photo(message):
 def handle_admin_decision(call):
   data = call.data
 
-  # إعادة المحاولة من قبل الطالب فوراً
   if data == 'retry_freshman':
     user_id = call.from_user.id
     conn = sqlite3.connect('freshmen_students.db')
@@ -307,7 +329,6 @@ def handle_admin_decision(call):
     start_freshman(call.message)
     return
 
-  # القبول
   if data.startswith('approve_'):
     target_user_id = int(data.split('_')[1])
 
@@ -363,7 +384,7 @@ def handle_admin_decision(call):
       )
 
       admin_name = call.from_user.first_name
-      bot.edit_message_text(
+      bot.edit_message_caption(
           f'✅ **تم قبول الطالب ({full_name} - {phone}) بنجاح بواسطة المشرف'
           f' {admin_name}.**',
           chat_id=call.message.chat.id,
@@ -377,7 +398,6 @@ def handle_admin_decision(call):
 
     conn.close()
 
-  # قائمة أسباب الرفض
   elif data.startswith('reject_menu_'):
     target_user_id = int(data.split('_')[2])
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -396,14 +416,13 @@ def handle_admin_decision(call):
     )
 
     markup.add(r1, r2, r3)
-    bot.edit_message_text(
+    bot.edit_message_caption(
         '📌 **اختر سبب رفض الطلب ليتم إبلاغ الطالب:**',
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
         reply_markup=markup,
     )
 
-  # إرسال سبب الرفض وإضافة زر الإعادة الفورية
   elif data.startswith('reject_reason_'):
     parts = data.split('_')
     target_user_id = int(parts[2])
@@ -435,36 +454,79 @@ def handle_admin_decision(call):
         target_user_id,
         f'❌ **عذراً، تعذر قبول طلب التوثيق الخاص بك.**\n\n'
         f'📌 **السبب:** {selected_reason}\n\n'
-        f'👇 **يمكنك إفادة البيانات وإعادة المحاولة بضغطة زر:**',
+        f'👇 **يمكنك إعادة المحاولة بضغطة زر:**',
         reply_markup=markup,
         parse_mode='Markdown',
     )
 
     admin_name = call.from_user.first_name
-    bot.edit_message_text(
+    bot.edit_message_caption(
         f'❌ **تم رفض الطلب بواسطة المشرف {admin_name}.**\nالسبب: {selected_reason}',
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
     )
 
 
-# ==================== أوامر الإحصائيات والبحث للأدمن ====================
-@bot.message_handler(commands=['stats_freshmen'])
-def stats_freshmen(message):
+# ==================== أمر القبول اليادوي الاحتياطي للأدمن ====================
+@bot.message_handler(commands=['approve_manual'])
+def manual_approve(message):
   if message.from_user.id != ADMIN_ID:
     return
+  args = message.text.split()
+  if len(args) < 2:
+    bot.reply_to(
+        message, '⚠️ اكتب الأمر هكذا:\n`/approve_manual TELEGRAM_ID`'
+    )
+    return
+
+  target_user_id = int(args[1].strip())
   conn = sqlite3.connect('freshmen_students.db')
   cursor = conn.cursor()
   cursor.execute(
-      "SELECT status, COUNT(*) FROM freshmen GROUP BY status"
+      'SELECT full_name FROM freshmen WHERE telegram_id = ?', (target_user_id,)
   )
-  stats = cursor.fetchall()
-  conn.close()
+  st = cursor.fetchone()
 
-  text = '📊 **إحصائيات توثيق المستجدين:**\n\n'
-  for status, count in stats:
-    text += f'• {status}: **{count}** طالب\n'
-  bot.reply_to(message, text, parse_mode='Markdown')
+  if not st:
+    bot.reply_to(message, '❌ المستخدم غير موجود.')
+    conn.close()
+    return
+
+  full_name = st[0]
+
+  try:
+    lectures_link = bot.create_chat_invite_link(
+        chat_id=FRESHMAN_LECTURES_ID, member_limit=1
+    ).invite_link
+    discussion_link = bot.create_chat_invite_link(
+        chat_id=FRESHMAN_DISCUSSION_ID, member_limit=1
+    ).invite_link
+
+    cursor.execute(
+        "UPDATE freshmen SET status = 'approved' WHERE telegram_id = ?",
+        (target_user_id,),
+    )
+    conn.commit()
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    btn1 = types.InlineKeyboardButton(
+        text='📚 الانضمام لقناة المحاضرات', url=lectures_link
+    )
+    btn2 = types.InlineKeyboardButton(
+        text='💬 الانضمام لمجموعة المناقشة', url=discussion_link
+    )
+    markup.add(btn1, btn2)
+
+    bot.send_message(
+        target_user_id,
+        f'🎉 مبارك قبولك وتوثيق حسابك يا {full_name}!',
+        reply_markup=markup,
+    )
+    bot.reply_to(message, f'✅ تم قبول الطالب {full_name} بنجاح.')
+  except Exception as e:
+    bot.reply_to(message, f'❌ خطأ: {str(e)}')
+
+  conn.close()
 
 
 # ==================== التشغيل ====================
