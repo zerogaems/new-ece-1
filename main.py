@@ -1,7 +1,7 @@
 import io
 import os
 import re
-import sqlite3
+import libsql
 from threading import Thread
 from flask import Flask
 import pandas as pd
@@ -23,12 +23,32 @@ def run_flask():
 
 
 # ==================== الإعدادات الأساسية ====================
-BOT_TOKEN = os.environ.get(
-    'BOT_TOKEN', 'ضع_التوكن_هنا_إن_لم_تستخدم_متغيرات_البيئة'
-)
-ADMIN_ID = int(
-    os.environ.get('ADMIN_ID', '7547218555')
-)  # Telegram ID الخاص بك كأدمن رئيسي
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '').strip()
+if not BOT_TOKEN:
+  raise RuntimeError('يجب ضبط متغير البيئة BOT_TOKEN قبل تشغيل البوت.')
+
+# يدعم أكثر من أدمن دفعة واحدة: ضع الآيديات مفصولة بفواصل، مثلاً:
+# ADMIN_IDS=7547218555,123456789,987654321
+ADMIN_IDS = {
+    int(x.strip())
+    for x in os.environ.get('ADMIN_IDS', '7547218555').split(',')
+    if x.strip().isdigit()
+}
+
+
+def is_admin(user_id):
+  return user_id in ADMIN_IDS
+
+
+def notify_all_admins(send_func):
+  """يستدعي send_func(admin_id) لكل أدمن، ويتجاوز أي أدمن فشل إرسال الرسالة
+  له (مثلاً حظر البوت) بدون ما يوقف إشعار باقي الأدمنية."""
+  for admin_id in ADMIN_IDS:
+    try:
+      send_func(admin_id)
+    except Exception as e:
+      print(f'⚠️ فشل إشعار الأدمن {admin_id}: {e}')
+
 
 FRESHMAN_LECTURES_ID = int(
     os.environ.get('FRESHMAN_LECTURES_ID', '-1004413316628')
@@ -40,6 +60,21 @@ FRESHMAN_DISCUSSION_ID = int(
 bot = telebot.TeleBot(BOT_TOKEN)
 user_sessions = {}
 admin_input_states = {}
+
+# ==================== الاتصال بقاعدة بيانات Turso (بدل ملف SQLite محلي) ====================
+TURSO_URL = os.environ.get('TURSO_DATABASE_URL', '').strip()
+TURSO_AUTH_TOKEN = os.environ.get('TURSO_AUTH_TOKEN', '').strip()
+if not TURSO_URL or not TURSO_AUTH_TOKEN:
+  raise RuntimeError(
+      'يجب ضبط TURSO_DATABASE_URL و TURSO_AUTH_TOKEN كمتغيرات بيئة قبل'
+      ' التشغيل.'
+  )
+
+
+def db_connect():
+  """يفتح اتصال جديد بقاعدة Turso. الواجهة نفس sqlite3 تقريباً (cursor /
+  execute / commit / close) لذلك باقي الكود ما احتاج تعديل كبير."""
+  return libsql.connect(database=TURSO_URL, auth_token=TURSO_AUTH_TOKEN)
 
 
 # ==================== تنظيف أرقام الهواتف ====================
@@ -58,7 +93,7 @@ def clean_phone(phone_str):
 
 # ==================== تهيئة قاعدة البيانات والأرشيف ====================
 def init_db():
-  conn = sqlite3.connect('freshmen_students.db')
+  conn = db_connect()
   cursor = conn.cursor()
   cursor.execute("""
         CREATE TABLE IF NOT EXISTS freshmen (
@@ -113,7 +148,7 @@ def get_admin_keyboard():
 
 @bot.message_handler(commands=['admin'])
 def admin_command(message):
-  if message.from_user.id != ADMIN_ID:
+  if not is_admin(message.from_user.id):
     bot.reply_to(message, '⚠️ عذراً، هذه اللوحة مخصصة لرئيس الهيئة/الأدمن فقط.')
     return
 
@@ -128,14 +163,14 @@ def admin_command(message):
 # ==================== التفاعل مع أزرار لوحة الأدمن ====================
 @bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
 def handle_admin_panel_callbacks(call):
-  if call.from_user.id != ADMIN_ID:
+  if not is_admin(call.from_user.id):
     bot.answer_callback_query(call.id, '⚠️ غير مصرح لك.', show_alert=True)
     return
 
   action = call.data
 
   if action == 'admin_stats':
-    conn = sqlite3.connect('freshmen_students.db')
+    conn = db_connect()
     cursor = conn.cursor()
     cursor.execute('SELECT COUNT(*) FROM freshmen')
     total = cursor.fetchone()[0]
@@ -160,7 +195,7 @@ def handle_admin_panel_callbacks(call):
     bot.answer_callback_query(call.id)
 
   elif action == 'admin_archive':
-    conn = sqlite3.connect('freshmen_students.db')
+    conn = db_connect()
     cursor = conn.cursor()
     cursor.execute(
         'SELECT telegram_id, full_name, status, created_at FROM freshmen ORDER'
@@ -204,7 +239,7 @@ def handle_admin_panel_callbacks(call):
 
   elif action == 'admin_export':
     bot.answer_callback_query(call.id, '⏳ جاري استخراج تقرير Excel...')
-    conn = sqlite3.connect('freshmen_students.db')
+    conn = db_connect()
     df = pd.read_sql_query('SELECT * FROM freshmen', conn)
     conn.close()
 
@@ -216,7 +251,7 @@ def handle_admin_panel_callbacks(call):
     bot.send_document(
         call.message.chat.id,
         document=types.InputFile(
-            output, filename='Freshmen_Students_Report.xlsx'
+            output, file_name='Freshmen_Students_Report.xlsx'
         ),
         caption='📊 تقرير الطلاب المستجدين وحالات التوثيق',
     )
@@ -233,11 +268,11 @@ def handle_admin_panel_callbacks(call):
 # ==================== عرض مجلد الطالب كاملاً بالصور للأدمن ====================
 @bot.callback_query_handler(func=lambda call: call.data.startswith('view_file_'))
 def handle_view_student_file(call):
-  if call.from_user.id != ADMIN_ID:
+  if not is_admin(call.from_user.id):
     return
 
   target_user_id = int(call.data.split('_')[2])
-  conn = sqlite3.connect('freshmen_students.db')
+  conn = db_connect()
   cursor = conn.cursor()
   cursor.execute(
       'SELECT full_name, phone, admission_photo_id, id_photo_id, status,'
@@ -304,7 +339,7 @@ def handle_view_student_file(call):
 
 # ==================== استقبال مدخلات البحث وفك القفل من الأدمن ====================
 @bot.message_handler(
-    func=lambda msg: msg.from_user.id == ADMIN_ID
+    func=lambda msg: is_admin(msg.from_user.id)
     and msg.from_user.id in admin_input_states
 )
 def handle_admin_search_and_reset(message):
@@ -312,7 +347,7 @@ def handle_admin_search_and_reset(message):
   query = message.text.strip()
 
   if state == 'awaiting_search':
-    conn = sqlite3.connect('freshmen_students.db')
+    conn = db_connect()
     cursor = conn.cursor()
     cursor.execute(
         'SELECT telegram_id, full_name, phone, status, created_at FROM freshmen'
@@ -340,7 +375,7 @@ def handle_admin_search_and_reset(message):
     del admin_input_states[message.from_user.id]
 
   elif state == 'awaiting_reset':
-    conn = sqlite3.connect('freshmen_students.db')
+    conn = db_connect()
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE freshmen SET status = 'reset' WHERE phone = ? OR telegram_id ="
@@ -359,15 +394,10 @@ def handle_admin_search_and_reset(message):
 
 
 # ==================== بدء التسجيل للمستجدين (/start) ====================
-@bot.message_handler(commands=['start'])
-def start_freshman(message):
-  user_id = message.from_user.id
-
-  if user_id == ADMIN_ID:
-    admin_command(message)
-    return
-
-  conn = sqlite3.connect('freshmen_students.db')
+def begin_registration_flow(user_id, chat_id):
+  """المنطق المشترك لبدء أو استئناف التسجيل، يستقبل user_id و chat_id
+  بشكل صريح حتى يشتغل صحيح سواء استُدعي من /start أو من زر (retry)."""
+  conn = db_connect()
   cursor = conn.cursor()
   cursor.execute(
       'SELECT status, full_name FROM freshmen WHERE telegram_id = ?', (user_id,)
@@ -379,14 +409,14 @@ def start_freshman(message):
     status, full_name = user
     if status == 'approved':
       bot.send_message(
-          message.chat.id,
+          chat_id,
           f'🎉 أهلاً بك مجدداً يا {full_name}!\n\nلقد تم توثيق حسابك مسبقاً'
           ' واستلام روابط السنة الأولى.',
       )
       return
     elif status == 'pending':
       bot.send_message(
-          message.chat.id,
+          chat_id,
           '⏳ طلبك قيد المراجعة حالياً من قبل الهيئة.\n\nيرجى الانتظار، وسيصلك'
           ' رابط الانضمام هنا فور التدقيق والقبول.',
       )
@@ -403,8 +433,19 @@ def start_freshman(message):
       '✍️ الخطوة (1/4): يرجى كتابة اسمك الثلاثي الكامل:'
   )
   bot.send_message(
-      message.chat.id, welcome_text, reply_markup=types.ReplyKeyboardRemove()
+      chat_id, welcome_text, reply_markup=types.ReplyKeyboardRemove()
   )
+
+
+@bot.message_handler(commands=['start'])
+def start_freshman(message):
+  user_id = message.from_user.id
+
+  if is_admin(user_id):
+    admin_command(message)
+    return
+
+  begin_registration_flow(user_id, message.chat.id)
 
 
 # ==================== خطوات إدخال البيانات والصور من الطالب ====================
@@ -503,7 +544,7 @@ def handle_id_photo(message):
   admission_photo_id = user_data['admission_photo']
 
   # 1. حفظ الطلب والمستندات في قاعدة البيانات
-  conn = sqlite3.connect('freshmen_students.db')
+  conn = db_connect()
   cursor = conn.cursor()
   cursor.execute(
       """
@@ -529,17 +570,26 @@ def handle_id_photo(message):
       ' فور الاعتماد.',
   )
 
-  # 3. تحويل الصور والبيانات المباشرة لشات الأدمن الشخصي (ADMIN_ID)
-  try:
-    username_str = (
-        f'@{message.from_user.username}'
-        if message.from_user.username
-        else 'لا يوجد'
-    )
+  # 3. تحويل الصور والبيانات المباشرة لشات كل أدمن (نسخة لكل واحد فيهم)
+  username_str = (
+      f'@{message.from_user.username}'
+      if message.from_user.username
+      else 'لا يوجد'
+  )
 
+  markup = types.InlineKeyboardMarkup(row_width=2)
+  btn_approve = types.InlineKeyboardButton(
+      text='✅ قبول وتوليد الرابط', callback_data=f'approve_{user_id}'
+  )
+  btn_reject = types.InlineKeyboardButton(
+      text='❌ رفض الطلب', callback_data=f'reject_menu_{user_id}'
+  )
+  markup.add(btn_approve, btn_reject)
+
+  def send_to_admin(admin_id):
     # إرسال الصورة الأولى (المفاضلة)
     bot.send_photo(
-        ADMIN_ID,
+        admin_id,
         admission_photo_id,
         caption=(
             f'📥 طلب توثيق مستجد جديد (1/2 - المفاضلة):\n\n'
@@ -549,26 +599,15 @@ def handle_id_photo(message):
             f'👤 المعرف: {username_str}'
         ),
     )
-
     # إرسال الصورة الثانية (الهوية) مع أزرار القبول والرفض المباشرة
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_approve = types.InlineKeyboardButton(
-        text='✅ قبول وتوليد الرابط', callback_data=f'approve_{user_id}'
-    )
-    btn_reject = types.InlineKeyboardButton(
-        text='❌ رفض الطلب', callback_data=f'reject_menu_{user_id}'
-    )
-    markup.add(btn_approve, btn_reject)
-
     bot.send_photo(
-        ADMIN_ID,
+        admin_id,
         id_photo_id,
         caption=f'🪪 (2/2 - صورة الهوية) للطالب: {full_name}\n👇 اتخذ القرار بضغطة زر:',
         reply_markup=markup,
     )
 
-  except Exception as e:
-    bot.send_message(ADMIN_ID, f'⚠️ خطأ في تحويل أوراق الطالب: {str(e)}')
+  notify_all_admins(send_to_admin)
 
   if user_id in user_sessions:
     del user_sessions[user_id]
@@ -581,11 +620,15 @@ def handle_id_photo(message):
     )
 )
 def handle_admin_decision(call):
+  if not is_admin(call.from_user.id):
+    bot.answer_callback_query(call.id, '⚠️ غير مصرح لك.', show_alert=True)
+    return
+
   data = call.data
 
   if data == 'retry_freshman':
     user_id = call.from_user.id
-    conn = sqlite3.connect('freshmen_students.db')
+    conn = db_connect()
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE freshmen SET status = 'reset' WHERE telegram_id = ?", (user_id,)
@@ -594,16 +637,16 @@ def handle_admin_decision(call):
     conn.close()
 
     bot.answer_callback_query(call.id, '👍 تم فتح التسجيل مجدداً.')
-    start_freshman(call.message)
+    begin_registration_flow(user_id, call.message.chat.id)
     return
 
   if data.startswith('approve_'):
     target_user_id = int(data.split('_')[1])
 
-    conn = sqlite3.connect('freshmen_students.db')
+    conn = db_connect()
     cursor = conn.cursor()
     cursor.execute(
-        'SELECT full_name, phone FROM freshmen WHERE telegram_id = ?',
+        'SELECT full_name, phone, status FROM freshmen WHERE telegram_id = ?',
         (target_user_id,),
     )
     st = cursor.fetchone()
@@ -613,7 +656,22 @@ def handle_admin_decision(call):
       conn.close()
       return
 
-    full_name, phone = st
+    full_name, phone, current_status = st
+
+    # حماية من التعارض: لو أدمن تاني سبقك وقبل/رفض هذا الطالب من نسخته
+    # الخاصة، ما نعيد تنفيذ العملية ولا نبعت روابط مكررة للطالب.
+    if current_status == 'approved':
+      bot.answer_callback_query(call.id, 'ℹ️ تم قبول هذا الطالب مسبقاً من أدمن آخر.', show_alert=True)
+      try:
+        bot.edit_message_caption(
+            caption=f'✅ تم قبول الطالب ({full_name} - {phone}) مسبقاً (من أدمن آخر).',
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+        )
+      except Exception:
+        pass
+      conn.close()
+      return
 
     try:
       lectures_link = bot.create_chat_invite_link(
@@ -701,8 +759,19 @@ def handle_admin_decision(call):
     }
     selected_reason = reasons.get(reason_code, 'الصور غير مطابقة للشروط.')
 
-    conn = sqlite3.connect('freshmen_students.db')
+    conn = db_connect()
     cursor = conn.cursor()
+    cursor.execute(
+        'SELECT status FROM freshmen WHERE telegram_id = ?', (target_user_id,)
+    )
+    row = cursor.fetchone()
+
+    # نفس حماية التعارض: تفادي رفض/إشعار مكرر لو أدمن تاني تصرف بالطلب قبلك.
+    if row and row[0] in ('approved', 'rejected'):
+      bot.answer_callback_query(call.id, 'ℹ️ تم التعامل مع هذا الطلب مسبقاً من أدمن آخر.', show_alert=True)
+      conn.close()
+      return
+
     cursor.execute(
         "UPDATE freshmen SET status = 'rejected' WHERE telegram_id = ?",
         (target_user_id,),
@@ -733,7 +802,7 @@ def handle_admin_decision(call):
 # ==================== أمر القبول اليدوي الاحتياطي للأدمن ====================
 @bot.message_handler(commands=['approve_manual'])
 def manual_approve(message):
-  if message.from_user.id != ADMIN_ID:
+  if not is_admin(message.from_user.id):
     return
   args = message.text.split()
   if len(args) < 2:
@@ -741,7 +810,7 @@ def manual_approve(message):
     return
 
   target_user_id = int(args[1].strip())
-  conn = sqlite3.connect('freshmen_students.db')
+  conn = db_connect()
   cursor = conn.cursor()
   cursor.execute(
       'SELECT full_name FROM freshmen WHERE telegram_id = ?', (target_user_id,)
