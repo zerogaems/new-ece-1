@@ -2,3 +2,4 @@ pyTelegramBotAPI
 Flask
 pandas
 openpyxl
+libsql
