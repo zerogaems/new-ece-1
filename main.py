@@ -1,12 +1,20 @@
 import io
 import os
 import re
+import time
+import logging
 import libsql
 from threading import Thread
 from flask import Flask
 import pandas as pd
 import telebot
 from telebot import types
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+)
+logger = logging.getLogger('freshmen_bot')
 
 # ==================== خادم Flask لإرضاء Render و UptimeRobot ====================
 app = Flask('')
@@ -47,7 +55,7 @@ def notify_all_admins(send_func):
     try:
       send_func(admin_id)
     except Exception as e:
-      print(f'⚠️ فشل إشعار الأدمن {admin_id}: {e}')
+      logger.warning('فشل إشعار الأدمن %s: %s', admin_id, e)
 
 
 FRESHMAN_LECTURES_ID = int(
@@ -73,8 +81,17 @@ if not TURSO_URL or not TURSO_AUTH_TOKEN:
 
 def db_connect():
   """يفتح اتصال جديد بقاعدة Turso. الواجهة نفس sqlite3 تقريباً (cursor /
-  execute / commit / close) لذلك باقي الكود ما احتاج تعديل كبير."""
-  return libsql.connect(database=TURSO_URL, auth_token=TURSO_AUTH_TOKEN)
+  execute / commit / close) لذلك باقي الكود ما احتاج تعديل كبير.
+  فيها إعادة محاولة تلقائية لو صار خطأ عابر (busy/idle stream) لحظة الاتصال."""
+  last_err = None
+  for attempt in range(3):
+    try:
+      return libsql.connect(database=TURSO_URL, auth_token=TURSO_AUTH_TOKEN)
+    except Exception as e:
+      last_err = e
+      logger.warning('db_connect attempt %s failed: %s', attempt + 1, e)
+      time.sleep(0.5 * (attempt + 1))
+  raise last_err
 
 
 # ==================== تنظيف أرقام الهواتف ====================
@@ -864,10 +881,20 @@ def manual_approve(message):
 
 # ==================== التشغيل ====================
 def run_bot():
-  bot.infinity_polling(skip_pending=True)
+  while True:
+    try:
+      bot.infinity_polling(skip_pending=True)
+    except Exception:
+      # هذا الخيط (Thread) يعمل بالخلفية بشكل منفصل عن سيرفر Flask؛ لو طاح
+      # بصمت هون بدون هاي الحلقة، البوت بيتوقف نهائياً عن الرد على تيليجرام
+      # بينما يبقى Render وUptimeRobot يظنون إنه شغال تمام (لأن Flask لسا
+      # شغالة وترد على فحوصات الصحة). فبنسجل الخطأ ونعيد المحاولة فوراً.
+      logger.exception('Polling stopped unexpectedly, restarting in 5s')
+      time.sleep(5)
 
 
 if __name__ == '__main__':
+  logger.info('Freshmen bot started')
   bot_thread = Thread(target=run_bot)
   bot_thread.daemon = True
   bot_thread.start()
