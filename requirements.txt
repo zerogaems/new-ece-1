@@ -1,4 +1,4 @@
-pyTelegramBotAPI>=4.30.0
+pyTelegramBotAPI>=4.31.0
 Flask
 openpyxl
 libsql
