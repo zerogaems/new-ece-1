@@ -69,8 +69,6 @@ DEFAULT_BRANCH_NAME = os.environ.get(
 )
 DEFAULT_OWNER_USERNAME = os.environ.get('OWNER_USERNAME', 'Youssef_Sabra')
 
-MAX_ATTEMPTS = int(os.environ.get('MAX_ATTEMPTS', '5'))  # محاولات التقديم
-MAX_LINK_REGEN = int(os.environ.get('MAX_LINK_REGEN', '1'))  # كم مرة الطالب يطلب روابط جديدة (0 = ممنوع)
 INVITE_TTL_HOURS = int(os.environ.get('INVITE_TTL_HOURS', '72'))  # صلاحية الرابط
 PAGE_SIZE = 8
 ZIP_PART_LIMIT = 45 * 1024 * 1024  # حد تيليجرام للملف 50MB
@@ -210,122 +208,245 @@ def status_label(s):
   return f'{status_icon(s)} {STATUS_LABELS.get(s, s)}'
 
 
-# ==================== الإيموجي المميز (Premium) + الأزرار الملونة ====================
-# الفكرة: الأدمن بيبعت للبوت رسالة فيها إيموجيات مميزة، والبوت بيربط كل إيموجي
-# مميز بالإيموجي العادي المقابل له. بعدها أي إيموجي عادي بنصوص وأزرار البوت
-# بيظهر مميز تلقائياً (وبالأزرار بيصير أيقونة الزر). لازم صاحب البوت يكون Premium.
+# ==================== الإيموجي (متغيرات Render) + الخط العريض + الأزرار الملونة ====================
+# كل إيموجي بيستخدمه البوت إله متغير بالريندر اسمه EMOJI_<الاسم> (الجدول بملف
+# render_env_variables.md). قيمة المتغير ممكن تكون:
+#   - رقم طويل = ID إيموجي مميز (Premium)   مثال: EMOJI_PARTY=5368324170671202286
+#   - أو إيموجي عادي بديل                    مثال: EMOJI_PARTY=🥳
+# والإيموجي المميز بيظهر بالنصوص وكأيقونة على الأزرار. لازم صاحب البوت Premium.
+# لمعرفة الـ ID: ⚙️ الإعدادات ← 🌟 الإيموجي المميز ← ابعت إيموجي مميز والبوت بيعطيك السطر جاهز.
 # الأزرار الملونة (style) مو مرتبطة بالـ Premium، بتشتغل للكل.
-BOT_EMOJIS = (
-    '🎉 ✅ ❌ ⏳ 🎓 📱 🪪 📄 🔗 📚 💬 📊 📁 📥 📋 🗂 ⚙️ ⚠️ 🚫 🔍 📣 🔓 🛠 📜 🚀 👋 🔙 '
-    '👥 📡 🎭 🏷 👤 🕒 📌 🔁 ♻️ 🔄 ➕ 🗑 ✏️ 📝 📷 ⛔ 👍 😢 ⭐ 📎 🗓 ⏰ 📭 📦 👆 👇 ◀️ ▶️'
-)
-PREMIUM_BROKEN = {'on': False, 'reason': ''}
-_pe_cache = {'raw': None, 'map': {}, 'rx': None}
+BOLD_ON, BOLD_OFF = '\ue000', '\ue001'
+CODE_ON, CODE_OFF = '\ue002', '\ue003'
 
 
-def u16len(text):
-  return len(text.encode('utf-16-le')) // 2
+def B(text):
+  """نص عريض (Bold) داخل رسائل البوت."""
+  return f'{BOLD_ON}{text}{BOLD_OFF}'
+
+
+def CODE(text):
+  """نص بخط ثابت (قابل للنسخ بلمسة)."""
+  return f'{CODE_ON}{text}{CODE_OFF}'
+
+
+# (اسم المتغير بدون EMOJI_ ، الإيموجي الافتراضي، وين بيُستخدم)
+EMOJI_SLOTS = [
+    ('PARTY', '🎉', 'احتفال القبول'),
+    ('GRAD_CAP', '🎓', 'ترحيب/اسم القسم'),
+    ('WAVE', '👋', 'ترحيب'),
+    ('VERIFIED', '✔', 'علامة التوثيق جنب يوزر مبرمج البوت'),
+    ('CHECK', '✅', 'قبول/نجاح/مفعّل'),
+    ('CROSS', '❌', 'رفض/فشل'),
+    ('HOURGLASS', '⏳', 'قيد المراجعة'),
+    ('WARNING', '⚠', 'تنبيه'),
+    ('NO_ENTRY', '⛔', 'ممنوع/موقّف'),
+    ('BAN', '🚫', 'حظر'),
+    ('INFO', 'ℹ', 'معلومة'),
+    ('PIN', '📌', 'السبب/الحالة'),
+    ('WRITING', '✍', 'خطوة كتابة الاسم'),
+    ('PHONE', '📱', 'خطوة رقم الهاتف'),
+    ('DOCUMENT', '📄', 'بطاقة المفاضلة'),
+    ('ID_CARD', '🪪', 'صورة الهوية'),
+    ('ROCKET', '🚀', 'تم استلام الطلب'),
+    ('REPEAT', '🔁', 'إعادة التقديم/المحاولات'),
+    ('LINK', '🔗', 'الروابط'),
+    ('ALARM_CLOCK', '⏰', 'صلاحية الروابط'),
+    ('POINT_DOWN', '👇', 'إشارة للأسفل'),
+    ('POINT_UP', '👆', 'إشارة للأعلى'),
+    ('CAMERA', '📷', 'سبب رفض: صورة غير واضحة'),
+    ('SAD', '😢', 'ملصق/رفض'),
+    ('BOOKS', '📚', 'زر قناة المحاضرات'),
+    ('CHAT', '💬', 'زر مجموعة المناقشة'),
+    ('PERSON', '👤', 'الاسم/الشخص'),
+    ('ID_BUTTON', '🆔', 'Telegram ID'),
+    ('CLOCK', '🕒', 'الوقت'),
+    ('MEMO', '📝', 'سبب الرفض'),
+    ('TOOLS', '🛠', 'لوحة التحكم'),
+    ('CHART', '📊', 'الإحصائيات'),
+    ('FOLDER', '📁', 'الأرشيف/المجلد'),
+    ('SEARCH', '🔍', 'البحث'),
+    ('UNLOCK', '🔓', 'فك القفل'),
+    ('INBOX', '📥', 'Excel المقبولين'),
+    ('CLIPBOARD', '📋', 'Excel الكل'),
+    ('CARD_BOX', '🗂', 'صور ZIP'),
+    ('MEGAPHONE', '📣', 'رسالة جماعية'),
+    ('SCROLL', '📜', 'سجل العمليات'),
+    ('GEAR', '⚙', 'الإعدادات'),
+    ('LABEL', '🏷', 'اسم الفرع'),
+    ('SATELLITE', '📡', 'القنوات والمجموعات'),
+    ('PEOPLE', '👥', 'الأدمنية'),
+    ('MASKS', '🎭', 'الملصقات'),
+    ('STAR_GLOW', '🌟', 'الإيموجي المميز'),
+    ('PAPERCLIP', '📎', 'Excel تلقائي'),
+    ('CALENDAR', '🗓', 'نسخة احتياطية'),
+    ('RECYCLE', '♻', 'فك الحظر'),
+    ('REFRESH', '🔄', 'إعادة المحاولة'),
+    ('PENCIL', '✏', 'إعادة تسمية'),
+    ('TRASH', '🗑', 'حذف'),
+    ('PLUS', '➕', 'إضافة'),
+    ('MINUS', '➖', 'غير مفعّل'),
+    ('BACK', '🔙', 'رجوع'),
+    ('UNDO', '↩', 'تراجع'),
+    ('ARROW_LEFT', '◀', 'السابق'),
+    ('ARROW_RIGHT', '▶', 'التالي'),
+    ('EMPTY_MAILBOX', '📭', 'لا يوجد'),
+    ('EYE', '👁', 'معاينة'),
+    ('THUMBS_UP', '👍', 'تم'),
+    ('STAR', '⭐', 'أدمن أساسي'),
+    ('PACKAGE', '📦', 'تجهيز'),
+    ('QUESTION', '❔', 'حالة غير معروفة'),
+]
 
 
 def norm_emoji(ch):
   return ch.replace('\ufe0f', '')
 
 
-def pe_data():
-  raw = get_setting('pe_map', '')
-  if raw != _pe_cache['raw']:
-    try:
-      mp = json.loads(raw) if raw else {}
-    except Exception:
-      mp = {}
-    keys = sorted(mp.keys(), key=len, reverse=True)
-    rx = (re.compile('|'.join(re.escape(k) + '\ufe0f?' for k in keys))
-          if keys else None)
-    _pe_cache.update(raw=raw, map=mp, rx=rx)
-  return _pe_cache['map'], _pe_cache['rx']
+def u16len(text):
+  return len(text.encode('utf-16-le')) // 2
+
+
+def _load_emoji_cfg():
+  cfg = {}
+  for name, ch, _usage in EMOJI_SLOTS:
+    val = os.environ.get('EMOJI_' + name, '').strip()
+    if not val:
+      continue
+    cfg[ch] = ('custom', val) if val.isdigit() else ('text', val)
+  return cfg
+
+
+EMOJI_CFG = _load_emoji_cfg()
+_SLOT_ALT = '|'.join(
+    re.escape(ch) + '\ufe0f?'
+    for ch in sorted({c for _, c, _ in EMOJI_SLOTS}, key=len, reverse=True)
+)
+_TOKEN_RX = re.compile('([\ue000-\ue003])|(' + _SLOT_ALT + ')')
+_LEAD_RX = re.compile('(' + _SLOT_ALT + ')')
+_SLOT_RX = re.compile(_SLOT_ALT)
+PREMIUM_BROKEN = {'on': False, 'reason': ''}
 
 
 def premium_active():
-  return (get_setting('premium_mode', 'on') == 'on'
-          and not PREMIUM_BROKEN['on'] and bool(pe_data()[0]))
+  return (not PREMIUM_BROKEN['on']
+          and any(v[0] == 'custom' for v in EMOJI_CFG.values()))
 
 
-def rich(text):
-  """يرجع (النص، entities) مع تحويل الإيموجي العادي المربوط لإيموجي مميز."""
-  if not text or not premium_active():
+def rich(text, premium=True):
+  """يرجع (النص، entities): بيطبّق Bold/Code وبيبدّل الإيموجي حسب متغيرات Render."""
+  if not text:
     return text, None
-  mp, rx = pe_data()
-  ents, out, pos, last = [], [], 0, 0
-  for mt in rx.finditer(text):
+  use_custom = premium and not PREMIUM_BROKEN['on']
+  out, ents, opened = [], [], {}
+  pos = last = 0
+  for mt in _TOKEN_RX.finditer(text):
     seg = text[last:mt.start()]
     out.append(seg)
     pos += u16len(seg)
-    tok = mt.group(0)
-    out.append(tok)
-    ents.append(types.MessageEntity(
-        type='custom_emoji', offset=pos, length=u16len(tok),
-        custom_emoji_id=mp[norm_emoji(tok)],
-    ))
-    pos += u16len(tok)
     last = mt.end()
-  out.append(text[last:])
+    mark = mt.group(1)
+    if mark:
+      if mark in (BOLD_ON, CODE_ON):
+        opened[mark] = pos
+      else:
+        on = BOLD_ON if mark == BOLD_OFF else CODE_ON
+        start = opened.pop(on, None)
+        if start is not None and pos > start:
+          ents.append(types.MessageEntity(
+              type='bold' if on == BOLD_ON else 'code',
+              offset=start, length=pos - start))
+      continue
+    tok = mt.group(2)
+    entry = EMOJI_CFG.get(norm_emoji(tok))
+    if entry and entry[0] == 'text':
+      tok = entry[1]
+    out.append(tok)
+    if entry and entry[0] == 'custom' and use_custom:
+      ents.append(types.MessageEntity(
+          type='custom_emoji', offset=pos, length=u16len(tok),
+          custom_emoji_id=entry[1]))
+    pos += u16len(tok)
+  tail = text[last:]
+  out.append(tail)
+  pos += u16len(tail)
+  for mark, start in opened.items():
+    if pos > start:
+      ents.append(types.MessageEntity(
+          type='bold' if mark == BOLD_ON else 'code',
+          offset=start, length=pos - start))
+  ents.sort(key=lambda e: (e.offset, -e.length))
   return ''.join(out), (ents[:100] or None)
 
 
+def _has_custom(ents):
+  return bool(ents) and any(e.type == 'custom_emoji' for e in ents)
+
+
+def emoji_text(text):
+  """للأزرار: يبدّل الإيموجي اللي قيمته إيموجي عادي، ويشيل علامات التنسيق."""
+  text = re.sub('[\ue000-\ue003]', '', text or '')
+
+  def sub(mt):
+    entry = EMOJI_CFG.get(norm_emoji(mt.group(0)))
+    return entry[1] if entry and entry[0] == 'text' else mt.group(0)
+
+  return _SLOT_RX.sub(sub, text)
+
+
 def _icon_for(text):
-  """لو النص بيبدأ بإيموجي مربوط: يرجع (icon_id, النص بدون الإيموجي)."""
-  if not premium_active():
-    return None, text
-  mp, rx = pe_data()
-  mt = rx.match(text or '')
-  if not mt:
-    return None, text
-  label = text[mt.end():].lstrip()
-  if not label:
-    return None, text
-  return mp[norm_emoji(mt.group(0))], label
+  """لو النص بيبدأ بإيموجي مميز: يرجع (icon_id, النص بدون الإيموجي)."""
+  if premium_active():
+    mt = _LEAD_RX.match(text or '')
+    if mt:
+      entry = EMOJI_CFG.get(norm_emoji(mt.group(0)))
+      label = text[mt.end():].lstrip()
+      if entry and entry[0] == 'custom' and label:
+        return entry[1], emoji_text(label)
+  return None, emoji_text(text)
 
 
 def _attempts(text, style):
   """محاولات بناء الزر من الأغنى للأبسط (حسب دعم نسخة المكتبة)."""
   icon_id, label = _icon_for(text)
+  plain = emoji_text(text)
   attempts = []
   if icon_id:
     extra = {'icon_custom_emoji_id': icon_id}
     if style:
       extra['style'] = style
-    attempts.append((label, extra))
+    attempts.append((label, extra, plain))
   if style:
-    attempts.append((text, {'style': style}))
-  attempts.append((text, {}))
+    attempts.append((plain, {'style': style}, plain))
+  attempts.append((plain, {}, plain))
   return attempts
 
 
 def btn(text, callback_data=None, url=None, style=None):
   """زر inline. style: 'primary' (أزرق) | 'success' (أخضر) | 'danger' (أحمر).
-  والإيموجي اللي بأول النص بيصير أيقونة مميزة للزر إذا كان مربوط."""
+  والإيموجي اللي بأول النص بيصير أيقونة مميزة للزر إذا كان مضبوط بالريندر."""
   kwargs = {}
   if callback_data is not None:
     kwargs['callback_data'] = callback_data
   if url is not None:
     kwargs['url'] = url
-  for t, extra in _attempts(text, style):
+  for t, extra, plain in _attempts(text, style):
     try:
       b = types.InlineKeyboardButton(text=t, **kwargs, **extra)
       if 'icon_custom_emoji_id' in extra:
-        b._fallback_text = text
+        b._fallback_text = plain
       return b
     except TypeError:
       continue
 
 
 def kbtn(text, request_contact=False, style=None):
-  for t, extra in _attempts(text, style):
+  for t, extra, plain in _attempts(text, style):
     try:
       b = types.KeyboardButton(text=t, request_contact=request_contact,
                                **extra)
       if 'icon_custom_emoji_id' in extra:
-        b._fallback_text = text
+        b._fallback_text = plain
       return b
     except TypeError:
       continue
@@ -357,12 +478,12 @@ def _is_premium_error(e):
                                 'icon', 'emoji', 'button_'))
 
 
-def _premium_guard(do, ents, markup):
-  """do(plain) ينفذ الإرسال. لو تيليجرام رفض الإيموجي المميز، بيرجع لنص عادي."""
+def _premium_guard(do, uses_premium, markup):
+  """do(plain) ينفذ الإرسال. لو تيليجرام رفض الإيموجي المميز، بيرجع لإيموجي عادي."""
   try:
     return do(False)
   except Exception as e:
-    if (ents or _has_icons(markup)) and _is_premium_error(e):
+    if (uses_premium or _has_icons(markup)) and _is_premium_error(e):
       PREMIUM_BROKEN.update(on=True, reason=str(e)[:200])
       logger.warning('Premium emoji rejected by Telegram, disabled: %s', e)
       if markup is not None:
@@ -373,12 +494,13 @@ def _premium_guard(do, ents, markup):
 
 def send_msg(chat_id, text, **kwargs):
   t, ents = rich(text)
-  return _premium_guard(
-      lambda plain: bot.send_message(
-          chat_id, text if plain else t,
-          **({} if plain or not ents else {'entities': ents}), **kwargs),
-      ents, kwargs.get('reply_markup'),
-  )
+
+  def do(plain):
+    tt, ee = rich(text, premium=False) if plain else (t, ents)
+    return bot.send_message(
+        chat_id, tt, **({'entities': ee} if ee else {}), **kwargs)
+
+  return _premium_guard(do, _has_custom(ents), kwargs.get('reply_markup'))
 
 
 def reply_msg(message, text, **kwargs):
@@ -386,14 +508,49 @@ def reply_msg(message, text, **kwargs):
 
 
 def send_photo_rich(chat_id, photo, caption=None, **kwargs):
-  t, ents = rich(caption) if caption else (caption, None)
-  return _premium_guard(
-      lambda plain: bot.send_photo(
-          chat_id, photo, caption=caption if plain else t,
-          **({} if plain or not ents else {'caption_entities': ents}),
-          **kwargs),
-      ents, kwargs.get('reply_markup'),
-  )
+  t, ents = rich(caption)
+
+  def do(plain):
+    tt, ee = rich(caption, premium=False) if plain else (t, ents)
+    return bot.send_photo(
+        chat_id, photo, caption=tt,
+        **({'caption_entities': ee} if ee else {}), **kwargs)
+
+  return _premium_guard(do, _has_custom(ents), kwargs.get('reply_markup'))
+
+
+# ==================== الملصقات (متغيرات Render أو من داخل البوت) ====================
+# (اسم الخانة، متغير Render، الوصف)
+STICKER_SLOTS = [
+    ('welcome', 'STICKER_WELCOME', '👋 الترحيب'),
+    ('p25', 'STICKER_PROGRESS_25', '25% (بعد الاسم)'),
+    ('p50', 'STICKER_PROGRESS_50', '50% (بعد رقم الهاتف)'),
+    ('p75', 'STICKER_PROGRESS_75', '75% (بعد صورة المفاضلة)'),
+    ('p100', 'STICKER_PROGRESS_100', '100% (بعد صورة الهوية)'),
+    ('approved', 'STICKER_APPROVED', '🎉 القبول'),
+    ('rejected', 'STICKER_REJECTED', '😢 الرفض'),
+]
+
+
+def sticker_file(slot):
+  """متغير Render إلو الأولوية، وإلا اللي انحفظ من داخل البوت."""
+  for s, env, _ in STICKER_SLOTS:
+    if s == slot:
+      return os.environ.get(env, '').strip() or get_setting(f'sticker_{slot}', '')
+  return ''
+
+
+def send_sticker_slot(chat_id, slot):
+  """يبعت الملصق إذا مضبوط. يرجع True إذا انبعت."""
+  file_id = sticker_file(slot)
+  if not file_id:
+    return False
+  try:
+    bot.send_sticker(chat_id, file_id)
+    return True
+  except Exception as e:
+    logger.info('sticker %s failed: %s', slot, e)
+    return False
 
 
 # ==================== تهيئة قاعدة البيانات ====================
@@ -646,28 +803,18 @@ def send_with_effect(chat_id, text, effect_id=None, **kwargs):
   return send_msg(chat_id, text, **kwargs)
 
 
-def send_sticker_slot(chat_id, slot):
-  file_id = get_setting(f'sticker_{slot}')
-  if not file_id:
-    return
-  try:
-    bot.send_sticker(chat_id, file_id)
-  except Exception as e:
-    logger.info('sticker %s failed: %s', slot, e)
-
-
 def show(call, text, markup=None):
   """يعدّل رسالة الأدمن الحالية، وإذا ما أمكن (مثلاً صورة) بيبعت رسالة جديدة."""
   t, ents = rich(text)
+
+  def do(plain):
+    tt, ee = rich(text, premium=False) if plain else (t, ents)
+    return bot.edit_message_text(
+        tt, call.message.chat.id, call.message.message_id,
+        **({'entities': ee} if ee else {}), reply_markup=markup)
+
   try:
-    _premium_guard(
-        lambda plain: bot.edit_message_text(
-            text if plain else t, call.message.chat.id,
-            call.message.message_id,
-            **({} if plain or not ents else {'entities': ents}),
-            reply_markup=markup),
-        ents, markup,
-    )
+    _premium_guard(do, _has_custom(ents), markup)
   except Exception as e:
     if 'not modified' in str(e).lower():
       return
@@ -676,24 +823,24 @@ def show(call, text, markup=None):
 
 def edit_caption_or_text(chat_id, message_id, text, markup=None):
   t, ents = rich(text)
+
+  def do_cap(plain):
+    tt, ee = rich(text, premium=False) if plain else (t, ents)
+    return bot.edit_message_caption(
+        caption=tt, chat_id=chat_id, message_id=message_id,
+        **({'caption_entities': ee} if ee else {}), reply_markup=markup)
+
+  def do_txt(plain):
+    tt, ee = rich(text, premium=False) if plain else (t, ents)
+    return bot.edit_message_text(
+        tt, chat_id, message_id,
+        **({'entities': ee} if ee else {}), reply_markup=markup)
+
   try:
-    _premium_guard(
-        lambda plain: bot.edit_message_caption(
-            caption=text if plain else t, chat_id=chat_id,
-            message_id=message_id,
-            **({} if plain or not ents else {'caption_entities': ents}),
-            reply_markup=markup),
-        ents, markup,
-    )
+    _premium_guard(do_cap, _has_custom(ents), markup)
   except Exception:
     try:
-      _premium_guard(
-          lambda plain: bot.edit_message_text(
-              text if plain else t, chat_id, message_id,
-              **({} if plain or not ents else {'entities': ents}),
-              reply_markup=markup),
-          ents, markup,
-      )
+      _premium_guard(do_txt, _has_custom(ents), markup)
     except Exception:
       pass
 
@@ -761,19 +908,21 @@ def send_links_to_student(target_id, full_name, links, first_time=True):
   if first_time:
     send_sticker_slot(target_id, 'approved')
     text = (
-        f'🎉 مبارك قبولك وتوثيق حسابك يا {full_name}!\n\n'
-        f'أهلاً بك رسمياً في قسم {branch_name()} 🎓\n'
+        f'🎉 {B("مبارك قبولك وتوثيق حسابك يا " + full_name + "!")}\n\n'
+        f'أهلاً بك رسمياً في قسم {B(branch_name())} 🎓\n'
         f'ممثل القسم: {owner_tag()}\n\n'
-        f'👇 إليك روابط الانضمام الخاصة بدفعتك (سنة أولى مستجدين):\n'
+        f'👇 {B("إليك روابط الانضمام الخاصة بدفعتك")} (سنة أولى مستجدين):\n'
         f'⏰ الروابط صالحة {INVITE_TTL_HOURS} ساعة ولمرة واحدة فقط، ولا تشاركها'
-        ' مع أحد.\n🔗 بتقدر تطلب روابط جديدة مرة وحدة بس إذا انتهت صلاحيتها.'
+        ' مع أحد.\n\n'
+        f'⚠️ {B("هذا التوثيق نهائي:")} لا يمكن التقديم مجدداً أو طلب روابط'
+        f' جديدة. إذا انتهت صلاحية الروابط تواصل مع {owner_tag()}.'
     )
     send_with_effect(
         target_id, text, EFFECT_CONFETTI, reply_markup=links_markup(links)
     )
   else:
     text = (
-        f'🔗 روابط الانضمام الجديدة يا {full_name}:\n'
+        f'🔗 {B("روابط الانضمام الجديدة يا " + full_name + ":")}\n'
         f'⏰ صالحة {INVITE_TTL_HOURS} ساعة ولمرة واحدة، والروابط القديمة'
         ' ألغيناها.'
     )
@@ -1013,7 +1162,7 @@ def get_admin_keyboard():
 
 def admin_panel_text():
   return (
-      '🛠️ لوحة تحكم الهيئة المباشرة (Admin Panel)\n'
+      f'🛠️ {B("لوحة تحكم الهيئة المباشرة (Admin Panel)")}\n'
       f'🎓 {branch_name()}\n\n'
       'جميع الطلبات تصلك هنا في محادثتك المباشرة.\n'
       'اختر من الأزرار أدناه 👇'
@@ -1055,7 +1204,7 @@ def cb_stats(call):
       (since,),
   )[0]
   text = (
-      '📊 إحصائيات توثيق المستجدين:\n\n'
+      f'📊 {B("إحصائيات توثيق المستجدين:")}\n\n'
       f'👥 إجمالي المتقدمين: {total}\n'
       f'✅ المقبولة: {d.get("approved", 0)}\n'
       f'⏳ المعلقة: {d.get("pending", 0)}\n'
@@ -1165,7 +1314,7 @@ def send_student_file(chat_id, tid):
   (full_name, phone, username, adm, idp, status, created, attempts,
    appr_by, appr_at, reason) = row
   info = (
-      '📁 مجلد الطالب الرقمي:\n\n'
+      f'📁 {B("مجلد الطالب الرقمي:")}\n\n'
       f'👤 الاسم: {full_name}\n'
       f'📱 الهاتف: {phone}\n'
       f'🆔 Telegram ID: {tid}\n'
@@ -1308,23 +1457,15 @@ def do_reject(target_id, admin_user, reason_text):
   )
   audit(admin_user, 'رفض', target_id, f'{full_name}: {reason_text}')
 
-  left = max(MAX_ATTEMPTS - (attempts or 0), 0)
-  markup = types.InlineKeyboardMarkup()
-  if left > 0:
-    markup.add(btn('🔄 إعادة رفع الصور والبيانات', 'retry_freshman',
-                   style='primary'))
-  note = (
-      f'\n\n🔁 باقي لك {left} محاولة.' if left > 0
-      else f'\n\n⛔ استنفدت المحاولات، تواصل مع {owner_tag()}.'
-  )
   text = f'✅ تم رفض الطلب.\nالسبب: {reason_text}'
   try:
     send_sticker_slot(target_id, 'rejected')
     send_msg(
         target_id,
-        f'❌ عذراً، تعذر قبول طلب التوثيق الخاص بك.\n\n📌 السبب:'
-        f' {reason_text}{note}',
-        reply_markup=markup if left > 0 else None,
+        f'❌ {B("عذراً، تعذر قبول طلب التوثيق الخاص بك.")}\n\n'
+        f'📌 {B("السبب:")} {reason_text}\n\n'
+        f'🔁 {B("بتقدر تقدّم من جديد")} بعد تصحيح الملاحظة: اكتب /start وأعد'
+        ' إرسال بياناتك وأوراقك. التقديم مفتوح لك كل ما احتجت.',
     )
   except Exception as e:
     text += f'\n⚠️ تعذر إبلاغ الطالب (غالباً حاجب البوت): {e}'
@@ -1352,65 +1493,55 @@ def reject_menu_markup(target_id):
 
 
 # ==================== بدء التسجيل للمستجدين ====================
-def progress_bar(step):
-  return '🟩' * step + '⬜' * (4 - step)
+def progress_step(chat_id, pct):
+  """ملصق التقدم (25/50/75/100). إذا ما في ملصق مضبوط بيرجع سطر نسبة مئوية."""
+  if send_sticker_slot(chat_id, f'p{pct}'):
+    return ''
+  return f'\n\n{B("📊 " + str(pct) + "%")}'
 
 
 def begin_registration_flow(user_id, chat_id):
   row = q_one(
-      'SELECT status, full_name, attempts, links_count FROM freshmen WHERE'
-      ' telegram_id = ?',
+      'SELECT status, full_name FROM freshmen WHERE telegram_id = ?',
       (user_id,),
   )
   if row:
-    status, full_name, attempts, links_used = row
+    status, full_name = row
     if status == 'banned':
       send_msg(
-          chat_id, f'🚫 تم إيقاف حسابك عن التوثيق. تواصل مع {owner_tag()}.'
+          chat_id,
+          f'🚫 {B("تم إيقاف حسابك عن التوثيق.")} تواصل مع {owner_tag()}.',
       )
       return
     if status == 'approved':
-      can_regen = MAX_LINK_REGEN > 0 and (links_used or 0) < MAX_LINK_REGEN
-      markup = types.InlineKeyboardMarkup()
-      if can_regen:
-        markup.add(btn('🔗 احصل على روابط جديدة (مرة واحدة)', 'mylinks',
-                       style='primary'))
       send_msg(
           chat_id,
-          f'🎉 أهلاً بك مجدداً يا {full_name}!\n\nتم توثيق حسابك مسبقاً.'
-          + ('\nإذا انتهت صلاحية روابطك اضغط الزر:' if can_regen else
-             f'\nإذا تحتاج روابط جديدة تواصل مع {owner_tag()}.'),
-          reply_markup=markup if can_regen else None,
+          f'✅ {B("تم توثيق حسابك مسبقاً يا " + full_name + ".")}\n\n'
+          'التوثيق نهائي: لا يمكن التقديم مرة ثانية ولا طلب روابط جديدة.\n'
+          f'إذا واجهتك مشكلة تواصل مع {owner_tag()}.',
       )
       return
     if status == 'pending':
       send_msg(
           chat_id,
-          '⏳ طلبك قيد المراجعة حالياً من قبل الهيئة.\n\nيرجى الانتظار، وسيصلك'
-          ' رابط الانضمام هنا فور التدقيق والقبول.',
+          f'⏳ {B("طلبك قيد المراجعة حالياً من قبل الهيئة.")}\n\nيرجى'
+          ' الانتظار، وسيصلك رابط الانضمام هنا فور التدقيق والقبول.',
       )
       return
-    if status == 'rejected' and (attempts or 0) >= MAX_ATTEMPTS:
-      send_msg(
-          chat_id,
-          f'⛔ استنفدت عدد محاولات التقديم. تواصل مع {owner_tag()}.',
-      )
-      return
+    # rejected / reset: التقديم مفتوح بدون حد للمحاولات
 
   save_session(user_id, step='NAME', name=None, phone=None,
                admission_photo=None)
   send_sticker_slot(chat_id, 'welcome')
   welcome_text = (
-      f'🎓 أهلاً بك في بوت توثيق الطلاب المستجدين\n'
-      f'قسم {branch_name()} - الهمك\n'
-      f'( بَرمَجَ هذا البوت {owner_tag()} )\n\n'
+      f'🎓 {B("أهلاً بك في بوت توثيق الطلاب المستجدين")}\n'
+      f'قسم {B(branch_name())} - الهمك\n'
+      f'( بَرمَجَ هذا البوت {owner_tag()} ✔️ )\n\n'
       'للانضمام لقناة ومجموعة السنة الأولى، يرجى إكمال خطوات التوثيق للتأكد'
       ' من قبولك بالقسم.\n\n'
-      f'{progress_bar(0)}\n'
-      '✍️ الخطوة (1/4): يرجى كتابة اسمك الثلاثي الكامل:'
+      f'✍️ {B("الخطوة (1/4):")} يرجى كتابة اسمك الثلاثي الكامل:'
   )
-  send_msg(chat_id, welcome_text,
-                   reply_markup=types.ReplyKeyboardRemove())
+  send_msg(chat_id, welcome_text, reply_markup=types.ReplyKeyboardRemove())
 
 
 @bot.message_handler(commands=['start'])
@@ -1639,19 +1770,24 @@ def handle_admin_input(message):
       reply_msg(message, '⚠️ ما لقيت إيموجي مميز بالرسالة. اختار من الإيموجيات'
                 ' المميزة (اللي بتظهر بحزم Premium) وأرسلها.')
       return
-    mp = dict(pe_data()[0])
-    raw16 = message.text.encode('utf-16-le')
-    added = []
+    raw16 = (message.text or '').encode('utf-16-le')
+    slot_by_char = {c: n for n, c, _ in EMOJI_SLOTS}
+    lines, seen = [], set()
     for e in ents:
       base = raw16[e.offset * 2:(e.offset + e.length) * 2].decode('utf-16-le')
       key = norm_emoji(base)
-      if key:
-        mp[key] = e.custom_emoji_id
-        added.append(key)
-    set_setting('pe_map', json.dumps(mp, ensure_ascii=False))
+      if (key, e.custom_emoji_id) in seen:
+        continue
+      seen.add((key, e.custom_emoji_id))
+      name = slot_by_char.get(key)
+      if name:
+        lines.append(f'{CODE("EMOJI_" + name + "=" + e.custom_emoji_id)}')
+      else:
+        lines.append(f'{base} → {CODE(e.custom_emoji_id)}\n'
+                     '(ما في متغير بالبوت لهذا الإيموجي الأساسي)')
     send_msg(message.chat.id,
-             f'✅ تم ربط {len(set(added))}: {" ".join(dict.fromkeys(added))}'
-             f'\nالمجموع: {len(mp)}. أرسل المزيد أو اضغط تم.')
+             B('📋 انسخ السطر وحطه بمتغيرات Render:') + '\n\n'
+             + '\n'.join(lines) + '\n\nأرسل غيرها أو اضغط تم.')
 
   elif state == 'awaiting_sticker':
     stk = message.sticker
@@ -1661,7 +1797,12 @@ def handle_admin_input(message):
     set_setting(f'sticker_{data["slot"]}', stk.file_id)
     audit(message.from_user, 'ضبط ملصق', None, data['slot'])
     admin_input_states.pop(admin_id, None)
-    reply_msg(message, '✅ تم حفظ الملصق.')
+    env_name = next((e for sl, e, _ in STICKER_SLOTS if sl == data['slot']), '')
+    reply_msg(
+        message,
+        f'✅ {B("تم حفظ الملصق.")}\n\nلو بدك تثبته بالريندر كمان (الريندر إلو'
+        f' الأولوية):\n{CODE(env_name + "=" + stk.file_id)}',
+    )
 
 
 # ==================== خطوات إدخال بيانات الطالب ====================
@@ -1683,7 +1824,8 @@ def handle_name(message):
       or len(full_name) > 60):
     send_msg(
         message.chat.id,
-        '⚠️ اكتب اسمك الثلاثي الكامل بالحروف فقط (بدون أرقام أو رموز).',
+        f'⚠️ {B("اكتب اسمك الثلاثي الكامل بالحروف فقط")} (بدون أرقام أو'
+        ' رموز).',
     )
     return
   save_session(user_id, step='PHONE', name=full_name)
@@ -1693,10 +1835,12 @@ def handle_name(message):
   )
   markup.add(kbtn('📱 مشاركة رقم الهاتف لتأكيد الهوية', request_contact=True,
                   style='primary'))
+  extra = progress_step(message.chat.id, 25)
   send_msg(
       message.chat.id,
-      f'أهلاً بك يا {full_name}! 👋\n\n{progress_bar(1)}\n'
-      '📱 الخطوة (2/4): يرجى الضغط على الزر أدناه لمشاركة رقم هاتفك المعتمد:',
+      f'أهلاً بك يا {B(full_name)}! 👋{extra}\n\n'
+      f'📱 {B("الخطوة (2/4):")} يرجى الضغط على الزر أدناه لمشاركة رقم هاتفك'
+      ' المعتمد:',
       reply_markup=markup,
   )
 
@@ -1709,20 +1853,21 @@ def handle_phone(message):
   if message.contact.user_id != user_id:
     send_msg(
         message.chat.id,
-        '⚠️ تنبيه: يرجى مشاركة رقم الهاتف الخاص بحسابك الحالي حصراً بالضغط على'
-        ' الزر.',
+        f'⚠️ {B("تنبيه:")} يرجى مشاركة رقم الهاتف الخاص بحسابك الحالي حصراً'
+        ' بالضغط على الزر.',
     )
     return
   phone = clean_phone(message.contact.phone_number)
   if not (8 <= len(phone) <= 15):
-    send_msg(message.chat.id, '⚠️ رقم الهاتف غير صالح، جرّب مجدداً.')
+    send_msg(message.chat.id, f'⚠️ {B("رقم الهاتف غير صالح،")} جرّب مجدداً.')
     return
   save_session(user_id, step='ADMISSION_PHOTO', phone=phone)
+  extra = progress_step(message.chat.id, 50)
   send_msg(
       message.chat.id,
-      f'✅ تم التحقق من رقم الهاتف بنجاح!\n\n{progress_bar(2)}\n'
-      '📄 الخطوة (3/4): يرجى إرسال صورة بطاقة المفاضلة (التي تظهر اسمك وقبولك'
-      ' في القسم):',
+      f'✅ {B("تم التحقق من رقم الهاتف بنجاح!")}{extra}\n\n'
+      f'📄 {B("الخطوة (3/4):")} يرجى إرسال صورة بطاقة المفاضلة (التي تظهر'
+      ' اسمك وقبولك في القسم):',
       reply_markup=types.ReplyKeyboardRemove(),
   )
 
@@ -1733,10 +1878,12 @@ def handle_admission_photo(message):
   save_session(
       user_id, step='ID_PHOTO', admission_photo=message.photo[-1].file_id
   )
+  extra = progress_step(message.chat.id, 75)
   send_msg(
       message.chat.id,
-      f'✅ تم استلام صورة المفاضلة بنجاح!\n\n{progress_bar(3)}\n'
-      '🪪 الخطوة (4/4) والأخيرة: يرجى إرسال صورة البطاقة الشخصية (الهوية):',
+      f'✅ {B("تم استلام صورة المفاضلة بنجاح!")}{extra}\n\n'
+      f'🪪 {B("الخطوة (4/4) والأخيرة:")} يرجى إرسال صورة البطاقة الشخصية'
+      ' (الهوية):',
   )
 
 
@@ -1785,10 +1932,10 @@ def handle_id_photo(message):
   )
   drop_session(user_id)
 
-  send_sticker_slot(message.chat.id, 'submitted')
+  extra = progress_step(message.chat.id, 100)
   send_msg(
       message.chat.id,
-      f'🚀 تم استلام بياناتك وأوراقك بنجاح!\n\n{progress_bar(4)}\n'
+      f'🚀 {B("تم استلام بياناتك وأوراقك بنجاح!")}{extra}\n\n'
       'طلبك الآن قيد المراجعة والتدقيق، وسيصلك إشعار بالقبول مع روابط القنوات'
       ' فور الاعتماد.',
   )
@@ -1821,7 +1968,7 @@ def handle_id_photo(message):
         admin_id,
         admission_photo_id,
         caption=(
-            '📥 طلب توثيق مستجد جديد (1/2 - المفاضلة):\n\n'
+            f'📥 {B("طلب توثيق مستجد جديد (1/2 - المفاضلة):")}\n\n'
             f'👤 الاسم: {full_name}\n'
             f'📱 الهاتف: {phone}\n'
             f'🆔 Telegram ID: {user_id}\n'
@@ -1886,29 +2033,8 @@ def cb_retry(call):
 
 
 def cb_mylinks(call):
-  uid = call.from_user.id
-  row = q_one(
-      'SELECT status, full_name, links_count FROM freshmen WHERE telegram_id'
-      ' = ?',
-      (uid,),
-  )
-  if not row or row[0] != 'approved':
-    answer(call, '⚠️ حسابك غير موثّق.', True)
-    return
-  status, full_name, count = row
-  if MAX_LINK_REGEN <= 0 or (count or 0) >= MAX_LINK_REGEN:
-    answer(call, f'⛔ استخدمت طلب الروابط مسبقاً. تواصل مع {owner_tag()}.',
-           True)
-    return
-  answer(call, '⏳ جاري توليد روابط جديدة...')
-  links, errors = generate_links(uid)
-  if not links:
-    send_msg(call.message.chat.id,
-                     f'❌ تعذر توليد الروابط، تواصل مع {owner_tag()}.')
-    return
-  q_exec('UPDATE freshmen SET links_count = COALESCE(links_count, 0) + 1'
-         ' WHERE telegram_id = ?', (uid,))
-  send_links_to_student(uid, full_name, links, first_time=False)
+  answer(call, '⛔ التوثيق نهائي ولا يمكن طلب روابط جديدة. تواصل مع المسؤول'
+         ' إذا واجهتك مشكلة.', True)
 
 
 def cb_approve(call, target_id):
@@ -2032,7 +2158,7 @@ def settings_markup():
 
 def settings_text():
   return (
-      '⚙️ الإعدادات\n\n'
+      f'⚙️ {B("الإعدادات")}\n\n'
       f'🏷 اسم الفرع: {branch_name()}\n'
       f'👤 المسؤول: {owner_tag()}\n'
       f'⏰ صلاحية الروابط: {INVITE_TTL_HOURS} ساعة'
@@ -2068,40 +2194,38 @@ def admins_view(call):
 
 
 def stickers_view(call):
-  slots = [('welcome', '👋 ملصق الترحيب'), ('submitted', '🚀 ملصق استلام الطلب'),
-           ('approved', '🎉 ملصق القبول'), ('rejected', '😢 ملصق الرفض')]
   m = types.InlineKeyboardMarkup(row_width=1)
-  for slot, label in slots:
-    on = '✅' if get_setting(f'sticker_{slot}') else '➖'
+  for slot, env, label in STICKER_SLOTS:
+    on = '✅' if sticker_file(slot) else '➖'
     m.add(btn(f'{label} {on}', f'set_stk_{slot}'))
-  m.add(btn('🗑 حذف كل الملصقات', 'set_stk_clear', style='danger'),
+  m.add(btn('🗑 حذف الملصقات المحفوظة بالبوت', 'set_stk_clear', style='danger'),
         btn('🔙 رجوع', 'admin_settings'))
-  show(call, '🎭 اختر خانة ثم أرسل لي الملصق اللي بدك ياه:', m)
+  show(call, B('🎭 الملصقات') + '\nاختر خانة ثم أرسل لي الملصق اللي بدك ياه.'
+       '\nبعد ما تحفظه بعطيك اسم متغير الريندر لتثبته فيه (اختياري).', m)
 
 
 def premium_view(call):
-  mp, _ = pe_data()
-  on = get_setting('premium_mode', 'on') == 'on'
-  lines = ['🌟 الإيموجي المميز (Premium)\n']
-  lines.append(f'الحالة: {"✅ مفعّل" if on else "⛔ موقّف"}')
-  lines.append(f'عدد الإيموجيات المربوطة: {len(mp)}')
-  if mp:
-    lines.append(' '.join(mp.keys()))
+  custom = [n for n, c, _ in EMOJI_SLOTS
+            if EMOJI_CFG.get(c, ('',))[0] == 'custom']
+  swapped = [n for n, c, _ in EMOJI_SLOTS
+             if EMOJI_CFG.get(c, ('',))[0] == 'text']
+  lines = [B('🌟 الإيموجي المميز (Premium)'), '',
+           'كل إيموجي بالبوت إله متغير بالريندر: EMOJI_<الاسم>',
+           '(الجدول الكامل بملف render_env_variables.md)', '',
+           f'🌟 مميزة مفعّلة: {len(custom)}',
+           f'🔁 مستبدلة بإيموجي عادي: {len(swapped)}']
+  if custom:
+    lines.append(', '.join(custom[:20]) + (' ...' if len(custom) > 20 else ''))
   if PREMIUM_BROKEN['on']:
     lines.append('\n⚠️ تيليجرام رفض الإيموجي المميز فتم إيقافه مؤقتاً. تأكد أن'
                  ' حساب صاحب البوت (اللي أنشأه من BotFather) عليه Premium، ثم'
                  ' اضغط "إعادة المحاولة".')
     lines.append(f'السبب: {PREMIUM_BROKEN["reason"]}')
   m = types.InlineKeyboardMarkup(row_width=1)
-  m.add(
-      btn('➕ إضافة/تحديث إيموجيات مميزة', 'set_pe_add', style='success'),
-      btn('👁 معاينة', 'set_pe_prev'),
-      btn(f'⚙️ التفعيل: {"✅" if on else "⛔"} (اضغط للتبديل)', 'set_pe_toggle'),
-  )
+  m.add(btn('🔍 كشف ID إيموجي مميز', 'set_pe_add', style='success'))
   if PREMIUM_BROKEN['on']:
     m.add(btn('🔄 إعادة المحاولة', 'set_pe_retry', style='primary'))
-  m.add(btn('🗑 حذف كل الربط', 'set_pe_clear', style='danger'),
-        btn('🔙 رجوع', 'admin_settings'))
+  m.add(btn('🔙 رجوع', 'admin_settings'))
   show(call, '\n'.join(lines), m)
 
 
@@ -2115,31 +2239,17 @@ def cb_settings(call, data):
                                               style='success'))
     send_msg(
         call.message.chat.id,
-        '🌟 أرسل لي رسالة (أو عدة رسائل) فيها الإيموجيات المميزة اللي بدك'
-        ' ياها.\nكل إيموجي مميز بيتربط تلقائياً بالإيموجي العادي المقابل له،'
-        ' فمثلاً إيموجي 🎉 مميز بيحل محل كل 🎉 بالبوت.\n\n'
-        f'📌 الإيموجيات المستخدمة بالبوت:\n{BOT_EMOJIS}\n\n'
-        'لما تخلص اضغط تم (أو /cancel).',
+        B('🌟 كشف ID الإيموجي المميز') + '\n\n'
+        'أرسل لي رسالة فيها الإيموجيات المميزة اللي بدك ياها (بتقدر تحط عدة'
+        ' إيموجيات برسالة وحدة).\nرح أرجعلك لكل واحد سطر جاهز تنسخه وتحطه'
+        ' بمتغيرات Render.\n\nلما تخلص اضغط تم (أو /cancel).',
         reply_markup=m,
     )
   elif data == 'set_pe_done':
     admin_input_states.pop(uid, None)
     premium_view(call)
-  elif data == 'set_pe_prev':
-    mp, _ = pe_data()
-    if not mp:
-      answer(call, 'ما في إيموجيات مربوطة بعد.', True)
-      return
-    send_msg(call.message.chat.id, 'معاينة: ' + ' '.join(mp.keys()))
-  elif data == 'set_pe_toggle':
-    set_setting('premium_mode',
-                'off' if get_setting('premium_mode', 'on') == 'on' else 'on')
-    premium_view(call)
   elif data == 'set_pe_retry':
     PREMIUM_BROKEN.update(on=False, reason='')
-    premium_view(call)
-  elif data == 'set_pe_clear':
-    set_setting('pe_map', '')
     premium_view(call)
   elif data == 'admin_settings':
 
@@ -2218,7 +2328,7 @@ def cb_settings(call, data):
   elif data == 'set_stickers':
     stickers_view(call)
   elif data == 'set_stk_clear':
-    for slot in ('welcome', 'submitted', 'approved', 'rejected'):
+    for slot, _env, _label in STICKER_SLOTS:
       set_setting(f'sticker_{slot}', '')
     stickers_view(call)
   elif data.startswith('set_stk_'):
