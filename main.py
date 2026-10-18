@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import re
 import time
@@ -69,8 +70,8 @@ DEFAULT_BRANCH_NAME = os.environ.get(
 DEFAULT_OWNER_USERNAME = os.environ.get('OWNER_USERNAME', 'Youssef_Sabra')
 
 MAX_ATTEMPTS = int(os.environ.get('MAX_ATTEMPTS', '5'))  # محاولات التقديم
-MAX_LINK_REGEN = max(1, int(os.environ.get('MAX_LINK_REGEN', '1')))  # طلب روابط جديدة (مرة واحدة افتراضياً)
-INVITE_TTL_HOURS = int(os.environ.get('INVITE_TTL_HOURS', '48'))  # صلاحية الرابط
+MAX_LINK_REGEN = int(os.environ.get('MAX_LINK_REGEN', '1'))  # كم مرة الطالب يطلب روابط جديدة (0 = ممنوع)
+INVITE_TTL_HOURS = int(os.environ.get('INVITE_TTL_HOURS', '72'))  # صلاحية الرابط
 PAGE_SIZE = 8
 ZIP_PART_LIMIT = 45 * 1024 * 1024  # حد تيليجرام للملف 50MB
 LOCAL_TZ = timezone(timedelta(hours=int(os.environ.get('TZ_OFFSET_HOURS', '3'))))
@@ -209,32 +210,190 @@ def status_label(s):
   return f'{status_icon(s)} {STATUS_LABELS.get(s, s)}'
 
 
-# ==================== أزرار ملونة (Bot API 9.4: style) ====================
+# ==================== الإيموجي المميز (Premium) + الأزرار الملونة ====================
+# الفكرة: الأدمن بيبعت للبوت رسالة فيها إيموجيات مميزة، والبوت بيربط كل إيموجي
+# مميز بالإيموجي العادي المقابل له. بعدها أي إيموجي عادي بنصوص وأزرار البوت
+# بيظهر مميز تلقائياً (وبالأزرار بيصير أيقونة الزر). لازم صاحب البوت يكون Premium.
+# الأزرار الملونة (style) مو مرتبطة بالـ Premium، بتشتغل للكل.
+BOT_EMOJIS = (
+    '🎉 ✅ ❌ ⏳ 🎓 📱 🪪 📄 🔗 📚 💬 📊 📁 📥 📋 🗂 ⚙️ ⚠️ 🚫 🔍 📣 🔓 🛠 📜 🚀 👋 🔙 '
+    '👥 📡 🎭 🏷 👤 🕒 📌 🔁 ♻️ 🔄 ➕ 🗑 ✏️ 📝 📷 ⛔ 👍 😢 ⭐ 📎 🗓 ⏰ 📭 📦 👆 👇 ◀️ ▶️'
+)
+PREMIUM_BROKEN = {'on': False, 'reason': ''}
+_pe_cache = {'raw': None, 'map': {}, 'rx': None}
+
+
+def u16len(text):
+  return len(text.encode('utf-16-le')) // 2
+
+
+def norm_emoji(ch):
+  return ch.replace('\ufe0f', '')
+
+
+def pe_data():
+  raw = get_setting('pe_map', '')
+  if raw != _pe_cache['raw']:
+    try:
+      mp = json.loads(raw) if raw else {}
+    except Exception:
+      mp = {}
+    keys = sorted(mp.keys(), key=len, reverse=True)
+    rx = (re.compile('|'.join(re.escape(k) + '\ufe0f?' for k in keys))
+          if keys else None)
+    _pe_cache.update(raw=raw, map=mp, rx=rx)
+  return _pe_cache['map'], _pe_cache['rx']
+
+
+def premium_active():
+  return (get_setting('premium_mode', 'on') == 'on'
+          and not PREMIUM_BROKEN['on'] and bool(pe_data()[0]))
+
+
+def rich(text):
+  """يرجع (النص، entities) مع تحويل الإيموجي العادي المربوط لإيموجي مميز."""
+  if not text or not premium_active():
+    return text, None
+  mp, rx = pe_data()
+  ents, out, pos, last = [], [], 0, 0
+  for mt in rx.finditer(text):
+    seg = text[last:mt.start()]
+    out.append(seg)
+    pos += u16len(seg)
+    tok = mt.group(0)
+    out.append(tok)
+    ents.append(types.MessageEntity(
+        type='custom_emoji', offset=pos, length=u16len(tok),
+        custom_emoji_id=mp[norm_emoji(tok)],
+    ))
+    pos += u16len(tok)
+    last = mt.end()
+  out.append(text[last:])
+  return ''.join(out), (ents[:100] or None)
+
+
+def _icon_for(text):
+  """لو النص بيبدأ بإيموجي مربوط: يرجع (icon_id, النص بدون الإيموجي)."""
+  if not premium_active():
+    return None, text
+  mp, rx = pe_data()
+  mt = rx.match(text or '')
+  if not mt:
+    return None, text
+  label = text[mt.end():].lstrip()
+  if not label:
+    return None, text
+  return mp[norm_emoji(mt.group(0))], label
+
+
+def _attempts(text, style):
+  """محاولات بناء الزر من الأغنى للأبسط (حسب دعم نسخة المكتبة)."""
+  icon_id, label = _icon_for(text)
+  attempts = []
+  if icon_id:
+    extra = {'icon_custom_emoji_id': icon_id}
+    if style:
+      extra['style'] = style
+    attempts.append((label, extra))
+  if style:
+    attempts.append((text, {'style': style}))
+  attempts.append((text, {}))
+  return attempts
+
+
 def btn(text, callback_data=None, url=None, style=None):
   """زر inline. style: 'primary' (أزرق) | 'success' (أخضر) | 'danger' (أحمر).
-  لو نسخة المكتبة قديمة وما بتدعم style بيرجع لزر عادي بدون ما يخرب شي."""
+  والإيموجي اللي بأول النص بيصير أيقونة مميزة للزر إذا كان مربوط."""
   kwargs = {}
   if callback_data is not None:
     kwargs['callback_data'] = callback_data
   if url is not None:
     kwargs['url'] = url
-  if style:
+  for t, extra in _attempts(text, style):
     try:
-      return types.InlineKeyboardButton(text=text, style=style, **kwargs)
+      b = types.InlineKeyboardButton(text=t, **kwargs, **extra)
+      if 'icon_custom_emoji_id' in extra:
+        b._fallback_text = text
+      return b
     except TypeError:
-      pass
-  return types.InlineKeyboardButton(text=text, **kwargs)
+      continue
 
 
 def kbtn(text, request_contact=False, style=None):
-  if style:
+  for t, extra in _attempts(text, style):
     try:
-      return types.KeyboardButton(
-          text=text, request_contact=request_contact, style=style
-      )
+      b = types.KeyboardButton(text=t, request_contact=request_contact,
+                               **extra)
+      if 'icon_custom_emoji_id' in extra:
+        b._fallback_text = text
+      return b
     except TypeError:
-      pass
-  return types.KeyboardButton(text=text, request_contact=request_contact)
+      continue
+
+
+def _buttons(markup):
+  rows = getattr(markup, 'keyboard', None) or getattr(markup, 'rows', None)
+  for row in rows or []:
+    for b in row:
+      yield b
+
+
+def _has_icons(markup):
+  return markup is not None and any(
+      getattr(b, 'icon_custom_emoji_id', None) for b in _buttons(markup)
+  )
+
+
+def _strip_icons(markup):
+  for b in _buttons(markup):
+    if getattr(b, 'icon_custom_emoji_id', None):
+      b.icon_custom_emoji_id = None
+      b.text = getattr(b, '_fallback_text', b.text)
+
+
+def _is_premium_error(e):
+  low = str(e).lower()
+  return any(k in low for k in ('custom emoji', 'custom_emoji', 'entit',
+                                'icon', 'emoji', 'button_'))
+
+
+def _premium_guard(do, ents, markup):
+  """do(plain) ينفذ الإرسال. لو تيليجرام رفض الإيموجي المميز، بيرجع لنص عادي."""
+  try:
+    return do(False)
+  except Exception as e:
+    if (ents or _has_icons(markup)) and _is_premium_error(e):
+      PREMIUM_BROKEN.update(on=True, reason=str(e)[:200])
+      logger.warning('Premium emoji rejected by Telegram, disabled: %s', e)
+      if markup is not None:
+        _strip_icons(markup)
+      return do(True)
+    raise
+
+
+def send_msg(chat_id, text, **kwargs):
+  t, ents = rich(text)
+  return _premium_guard(
+      lambda plain: bot.send_message(
+          chat_id, text if plain else t,
+          **({} if plain or not ents else {'entities': ents}), **kwargs),
+      ents, kwargs.get('reply_markup'),
+  )
+
+
+def reply_msg(message, text, **kwargs):
+  return send_msg(message.chat.id, text, **kwargs)
+
+
+def send_photo_rich(chat_id, photo, caption=None, **kwargs):
+  t, ents = rich(caption) if caption else (caption, None)
+  return _premium_guard(
+      lambda plain: bot.send_photo(
+          chat_id, photo, caption=caption if plain else t,
+          **({} if plain or not ents else {'caption_entities': ents}),
+          **kwargs),
+      ents, kwargs.get('reply_markup'),
+  )
 
 
 # ==================== تهيئة قاعدة البيانات ====================
@@ -479,12 +638,12 @@ def audit(actor, action, target_id=None, details=''):
 def send_with_effect(chat_id, text, effect_id=None, **kwargs):
   if effect_id:
     try:
-      return bot.send_message(
+      return send_msg(
           chat_id, text, message_effect_id=effect_id, **kwargs
       )
     except Exception as e:
       logger.info('effect failed (%s), retrying without effect', e)
-  return bot.send_message(chat_id, text, **kwargs)
+  return send_msg(chat_id, text, **kwargs)
 
 
 def send_sticker_slot(chat_id, slot):
@@ -499,27 +658,41 @@ def send_sticker_slot(chat_id, slot):
 
 def show(call, text, markup=None):
   """يعدّل رسالة الأدمن الحالية، وإذا ما أمكن (مثلاً صورة) بيبعت رسالة جديدة."""
+  t, ents = rich(text)
   try:
-    bot.edit_message_text(
-        text, call.message.chat.id, call.message.message_id,
-        reply_markup=markup,
+    _premium_guard(
+        lambda plain: bot.edit_message_text(
+            text if plain else t, call.message.chat.id,
+            call.message.message_id,
+            **({} if plain or not ents else {'entities': ents}),
+            reply_markup=markup),
+        ents, markup,
     )
   except Exception as e:
     if 'not modified' in str(e).lower():
       return
-    bot.send_message(call.message.chat.id, text, reply_markup=markup)
+    send_msg(call.message.chat.id, text, reply_markup=markup)
 
 
 def edit_caption_or_text(chat_id, message_id, text, markup=None):
+  t, ents = rich(text)
   try:
-    bot.edit_message_caption(
-        caption=text, chat_id=chat_id, message_id=message_id,
-        reply_markup=markup,
+    _premium_guard(
+        lambda plain: bot.edit_message_caption(
+            caption=text if plain else t, chat_id=chat_id,
+            message_id=message_id,
+            **({} if plain or not ents else {'caption_entities': ents}),
+            reply_markup=markup),
+        ents, markup,
     )
   except Exception:
     try:
-      bot.edit_message_text(
-          text, chat_id, message_id, reply_markup=markup
+      _premium_guard(
+          lambda plain: bot.edit_message_text(
+              text if plain else t, chat_id, message_id,
+              **({} if plain or not ents else {'entities': ents}),
+              reply_markup=markup),
+          ents, markup,
       )
     except Exception:
       pass
@@ -593,7 +766,7 @@ def send_links_to_student(target_id, full_name, links, first_time=True):
         f'ممثل القسم: {owner_tag()}\n\n'
         f'👇 إليك روابط الانضمام الخاصة بدفعتك (سنة أولى مستجدين):\n'
         f'⏰ الروابط صالحة {INVITE_TTL_HOURS} ساعة ولمرة واحدة فقط، ولا تشاركها'
-        ' مع أحد.'
+        ' مع أحد.\n🔗 بتقدر تطلب روابط جديدة مرة وحدة بس إذا انتهت صلاحيتها.'
     )
     send_with_effect(
         target_id, text, EFFECT_CONFETTI, reply_markup=links_markup(links)
@@ -604,7 +777,7 @@ def send_links_to_student(target_id, full_name, links, first_time=True):
         f'⏰ صالحة {INVITE_TTL_HOURS} ساعة ولمرة واحدة، والروابط القديمة'
         ' ألغيناها.'
     )
-    bot.send_message(target_id, text, reply_markup=links_markup(links))
+    send_msg(target_id, text, reply_markup=links_markup(links))
 
 
 # ==================== Excel ====================
@@ -695,10 +868,12 @@ def send_excel_to(chat_ids, only_approved=True, caption=None):
   )
   for cid in chat_ids:
     try:
+      cap_t, cap_e = rich(caption)
       bot.send_document(
           cid,
           document=types.InputFile(io.BytesIO(data), file_name=file_name),
-          caption=caption,
+          caption=cap_t,
+          **({'caption_entities': cap_e} if cap_e else {}),
       )
     except Exception as e:
       logger.warning('فشل إرسال Excel إلى %s: %s', cid, e)
@@ -731,9 +906,9 @@ def export_photos_zip(chat_id):
         ' COALESCE(approved_at, created_at), full_name'
     )
     if not rows:
-      bot.send_message(chat_id, '📭 لا يوجد طلاب مقبولون بعد.')
+      send_msg(chat_id, '📭 لا يوجد طلاب مقبولون بعد.')
       return
-    progress = bot.send_message(
+    progress = send_msg(
         chat_id, f'⏳ جاري تجهيز صور {len(rows)} طالب... ممكن ياخد دقائق.'
     )
     state = {'part': 1, 'size': 0, 'buf': io.BytesIO()}
@@ -785,10 +960,10 @@ def export_photos_zip(chat_id):
     msg = '✅ انتهى التجهيز.'
     if failed:
       msg += f'\n⚠️ تعذر تحميل {len(failed)} صورة:\n' + '\n'.join(failed[:15])
-    bot.send_message(chat_id, msg)
+    send_msg(chat_id, msg)
   except Exception as e:
     logger.exception('zip export failed')
-    bot.send_message(chat_id, f'❌ فشل تجهيز الملفات: {e}')
+    send_msg(chat_id, f'❌ فشل تجهيز الملفات: {e}')
 
 
 def backup_loop():
@@ -848,10 +1023,10 @@ def admin_panel_text():
 @bot.message_handler(commands=['admin'])
 def admin_command(message):
   if not is_admin(message.from_user.id):
-    bot.reply_to(message, '⚠️ عذراً، هذه اللوحة مخصصة للأدمن فقط.')
+    reply_msg(message, '⚠️ عذراً، هذه اللوحة مخصصة للأدمن فقط.')
     return
   admin_input_states.pop(message.from_user.id, None)
-  bot.send_message(
+  send_msg(
       message.chat.id, admin_panel_text(), reply_markup=get_admin_keyboard()
   )
 
@@ -861,11 +1036,11 @@ def cancel_command(message):
   uid = message.from_user.id
   if is_admin(uid):
     if admin_input_states.pop(uid, None):
-      bot.reply_to(message, '↩️ تم إلغاء العملية.')
+      reply_msg(message, '↩️ تم إلغاء العملية.')
     return
   if uid in sessions:
     drop_session(uid)
-    bot.reply_to(message, '↩️ تم إلغاء التسجيل. اكتب /start للبدء من جديد.')
+    reply_msg(message, '↩️ تم إلغاء التسجيل. اكتب /start للبدء من جديد.')
 
 
 def cb_stats(call):
@@ -985,7 +1160,7 @@ def send_student_file(chat_id, tid):
       (tid,),
   )
   if not row:
-    bot.send_message(chat_id, '❌ سجل الطالب غير موجود.')
+    send_msg(chat_id, '❌ سجل الطالب غير موجود.')
     return
   (full_name, phone, username, adm, idp, status, created, attempts,
    appr_by, appr_at, reason) = row
@@ -1003,23 +1178,23 @@ def send_student_file(chat_id, tid):
     info += f'\n✅ قُبل بواسطة: {appr_by} ({to_local(appr_at)})'
   if reason and status == 'rejected':
     info += f'\n📝 سبب الرفض: {reason}'
-  bot.send_message(chat_id, info)
+  send_msg(chat_id, info)
   if adm:
     try:
-      bot.send_photo(chat_id, adm, caption=f'📄 صورة المفاضلة: {full_name}')
+      send_photo_rich(chat_id, adm, caption=f'📄 صورة المفاضلة: {full_name}')
     except Exception:
       pass
   markup = student_actions_markup(tid, status)
   if idp:
     try:
-      bot.send_photo(
+      send_photo_rich(
           chat_id, idp, caption=f'🪪 صورة الهوية: {full_name}',
           reply_markup=markup,
       )
       return
     except Exception:
       pass
-  bot.send_message(chat_id, '⚙️ إجراءات:', reply_markup=markup)
+  send_msg(chat_id, '⚙️ إجراءات:', reply_markup=markup)
 
 
 # ==================== القبول والرفض (ذرّي) ====================
@@ -1145,7 +1320,7 @@ def do_reject(target_id, admin_user, reason_text):
   text = f'✅ تم رفض الطلب.\nالسبب: {reason_text}'
   try:
     send_sticker_slot(target_id, 'rejected')
-    bot.send_message(
+    send_msg(
         target_id,
         f'❌ عذراً، تعذر قبول طلب التوثيق الخاص بك.\n\n📌 السبب:'
         f' {reason_text}{note}',
@@ -1183,35 +1358,40 @@ def progress_bar(step):
 
 def begin_registration_flow(user_id, chat_id):
   row = q_one(
-      'SELECT status, full_name, attempts FROM freshmen WHERE telegram_id = ?',
+      'SELECT status, full_name, attempts, links_count FROM freshmen WHERE'
+      ' telegram_id = ?',
       (user_id,),
   )
   if row:
-    status, full_name, attempts = row
+    status, full_name, attempts, links_used = row
     if status == 'banned':
-      bot.send_message(
+      send_msg(
           chat_id, f'🚫 تم إيقاف حسابك عن التوثيق. تواصل مع {owner_tag()}.'
       )
       return
     if status == 'approved':
+      can_regen = MAX_LINK_REGEN > 0 and (links_used or 0) < MAX_LINK_REGEN
       markup = types.InlineKeyboardMarkup()
-      markup.add(btn('🔗 احصل على روابط جديدة', 'mylinks', style='primary'))
-      bot.send_message(
+      if can_regen:
+        markup.add(btn('🔗 احصل على روابط جديدة (مرة واحدة)', 'mylinks',
+                       style='primary'))
+      send_msg(
           chat_id,
           f'🎉 أهلاً بك مجدداً يا {full_name}!\n\nتم توثيق حسابك مسبقاً.'
-          '\nإذا انتهت صلاحية روابطك اضغط الزر:',
-          reply_markup=markup,
+          + ('\nإذا انتهت صلاحية روابطك اضغط الزر:' if can_regen else
+             f'\nإذا تحتاج روابط جديدة تواصل مع {owner_tag()}.'),
+          reply_markup=markup if can_regen else None,
       )
       return
     if status == 'pending':
-      bot.send_message(
+      send_msg(
           chat_id,
           '⏳ طلبك قيد المراجعة حالياً من قبل الهيئة.\n\nيرجى الانتظار، وسيصلك'
           ' رابط الانضمام هنا فور التدقيق والقبول.',
       )
       return
     if status == 'rejected' and (attempts or 0) >= MAX_ATTEMPTS:
-      bot.send_message(
+      send_msg(
           chat_id,
           f'⛔ استنفدت عدد محاولات التقديم. تواصل مع {owner_tag()}.',
       )
@@ -1229,7 +1409,7 @@ def begin_registration_flow(user_id, chat_id):
       f'{progress_bar(0)}\n'
       '✍️ الخطوة (1/4): يرجى كتابة اسمك الثلاثي الكامل:'
   )
-  bot.send_message(chat_id, welcome_text,
+  send_msg(chat_id, welcome_text,
                    reply_markup=types.ReplyKeyboardRemove())
 
 
@@ -1291,7 +1471,7 @@ def handle_admin_input(message):
 
   if state == 'awaiting_search':
     if not text:
-      bot.reply_to(message, '✍️ أرسل نص للبحث (اسم / هاتف / ID).')
+      reply_msg(message, '✍️ أرسل نص للبحث (اسم / هاتف / ID).')
       return
     like = f'%{text}%'
     phone_like = f'%{clean_phone(text)}%' if clean_phone(text) else like
@@ -1303,13 +1483,13 @@ def handle_admin_input(message):
     )
     admin_input_states.pop(admin_id, None)
     if not rows:
-      bot.reply_to(message, '❌ لم يتم العثور على أي طالب مطابق للبحث.')
+      reply_msg(message, '❌ لم يتم العثور على أي طالب مطابق للبحث.')
       return
     markup = types.InlineKeyboardMarkup()
     for tid, name, phone, status in rows:
       markup.add(btn(f'{status_icon(status)} {name} ({phone})',
                      f'view_file_{tid}'))
-    bot.reply_to(message, f'🔍 نتائج البحث عن ({text}):', reply_markup=markup)
+    reply_msg(message, f'🔍 نتائج البحث عن ({text}):', reply_markup=markup)
 
   elif state == 'awaiting_reset':
     phone = clean_phone(text)
@@ -1321,11 +1501,11 @@ def handle_admin_input(message):
     )
     admin_input_states.pop(admin_id, None)
     if not row:
-      bot.reply_to(message, '❌ لم يتم العثور على الطالب.')
+      reply_msg(message, '❌ لم يتم العثور على الطالب.')
       return
     target, name, old = row
     if old == 'banned':
-      bot.reply_to(message, '🚫 هذا الطالب محظور، افتح مجلده وفك الحظر.')
+      reply_msg(message, '🚫 هذا الطالب محظور، افتح مجلده وفك الحظر.')
       return
     q_exec(
         "UPDATE freshmen SET status = 'reset', attempts = 0, approved_by ="
@@ -1335,15 +1515,15 @@ def handle_admin_input(message):
     revoke_old_links(target)
     drop_session(target)
     audit(message.from_user, 'فك قفل', target, name)
-    bot.reply_to(message, f'✅ تم فك القفل عن ({name}) وصار بإمكانه التسجيل من جديد.')
+    reply_msg(message, f'✅ تم فك القفل عن ({name}) وصار بإمكانه التسجيل من جديد.')
 
   elif state == 'awaiting_reject_text':
     if not text:
-      bot.reply_to(message, '✍️ اكتب سبب الرفض كنص.')
+      reply_msg(message, '✍️ اكتب سبب الرفض كنص.')
       return
     admin_input_states.pop(admin_id, None)
     ok, msg = do_reject(data['target'], message.from_user, text[:300])
-    bot.reply_to(message, msg)
+    reply_msg(message, msg)
     if ok and data.get('chat_id'):
       edit_caption_or_text(data['chat_id'], data['message_id'], msg)
 
@@ -1359,7 +1539,7 @@ def handle_admin_input(message):
     m = types.InlineKeyboardMarkup(row_width=2)
     m.add(btn(f'✅ إرسال لـ {count} طالب', 'bc_yes', style='success'),
           btn('❌ إلغاء', 'bc_no', style='danger'))
-    bot.send_message(
+    send_msg(
         message.chat.id,
         f'👆 هذه معاينة الرسالة. بدك ترسلها لكل المقبولين ({count})؟',
         reply_markup=m,
@@ -1371,17 +1551,17 @@ def handle_admin_input(message):
     set_setting('branch_name', text[:80])
     audit(message.from_user, 'تغيير اسم الفرع', None, text[:80])
     admin_input_states.pop(admin_id, None)
-    bot.reply_to(message, f'✅ تم ضبط اسم الفرع: {text[:80]}')
+    reply_msg(message, f'✅ تم ضبط اسم الفرع: {text[:80]}')
 
   elif state == 'awaiting_owner':
     username = text.lstrip('@').strip()
     if not re.fullmatch(r'[A-Za-z0-9_]{4,32}', username):
-      bot.reply_to(message, '⚠️ يوزر غير صالح. أرسله بدون مسافات، مثال: Youssef_Sabra')
+      reply_msg(message, '⚠️ يوزر غير صالح. أرسله بدون مسافات، مثال: Youssef_Sabra')
       return
     set_setting('owner_username', username)
     audit(message.from_user, 'تغيير يوزر المسؤول', None, username)
     admin_input_states.pop(admin_id, None)
-    bot.reply_to(message, f'✅ تم ضبط يوزر المسؤول: @{username}')
+    reply_msg(message, f'✅ تم ضبط يوزر المسؤول: @{username}')
 
   elif state == 'awaiting_ch_add':
     fc = extract_forward_chat(message)
@@ -1390,8 +1570,7 @@ def handle_admin_input(message):
     elif re.fullmatch(r'-?\d{6,}', text):
       chat_id = int(text)
     else:
-      bot.reply_to(
-          message,
+      reply_msg(message,
           '⚠️ حوّل لي رسالة من القناة/المجموعة، أو أرسل الـ ID الخاص فيها'
           ' (مثال: -1001234567890).',
       )
@@ -1406,8 +1585,7 @@ def handle_admin_input(message):
           member, 'can_invite_users', True) is False:
         raise RuntimeError('البوت ما عنده صلاحية Invite Users')
     except Exception as e:
-      bot.reply_to(
-          message,
+      reply_msg(message,
           f'❌ تعذر الإضافة: {e}\nاجعل البوت مشرفاً مع صلاحية دعوة المستخدمين'
           ' ثم جرّب مرة ثانية.',
       )
@@ -1418,11 +1596,11 @@ def handle_admin_input(message):
              (chat.id, chat.title or str(chat.id), kind))
     except Exception:
       admin_input_states.pop(admin_id, None)
-      bot.reply_to(message, 'ℹ️ هذه القناة/المجموعة مضافة مسبقاً.')
+      reply_msg(message, 'ℹ️ هذه القناة/المجموعة مضافة مسبقاً.')
       return
     audit(message.from_user, 'إضافة قناة', chat.id, chat.title)
     admin_input_states.pop(admin_id, None)
-    bot.reply_to(message, f'✅ تمت إضافة: {chat.title}')
+    reply_msg(message, f'✅ تمت إضافة: {chat.title}')
 
   elif state == 'awaiting_ch_rename':
     if not text:
@@ -1431,7 +1609,7 @@ def handle_admin_input(message):
            (text[:60], data['id']))
     audit(message.from_user, 'تعديل اسم قناة', data['id'], text[:60])
     admin_input_states.pop(admin_id, None)
-    bot.reply_to(message, f'✅ تم تغيير الاسم إلى: {text[:60]}')
+    reply_msg(message, f'✅ تم تغيير الاسم إلى: {text[:60]}')
 
   elif state == 'awaiting_admin_add':
     new_id = None
@@ -1441,7 +1619,7 @@ def handle_admin_input(message):
     elif text.isdigit():
       new_id = int(text)
     if not new_id:
-      bot.reply_to(message, '⚠️ أرسل Telegram ID رقمي، أو حوّل رسالة من الشخص.')
+      reply_msg(message, '⚠️ أرسل Telegram ID رقمي، أو حوّل رسالة من الشخص.')
       return
     q_exec(
         'INSERT INTO admins (telegram_id, name, added_by, added_at) VALUES'
@@ -1452,17 +1630,38 @@ def handle_admin_input(message):
     reload_admins()
     audit(message.from_user, 'إضافة أدمن', new_id)
     admin_input_states.pop(admin_id, None)
-    bot.reply_to(message, f'✅ تمت إضافة الأدمن {new_id}.\n(لازم يعمل /start للبوت مرة وحدة.)')
+    reply_msg(message, f'✅ تمت إضافة الأدمن {new_id}.\n(لازم يعمل /start للبوت مرة وحدة.)')
+
+  elif state == 'awaiting_premium_emoji':
+    ents = [e for e in (message.entities or [])
+            if getattr(e, 'type', '') == 'custom_emoji']
+    if not ents:
+      reply_msg(message, '⚠️ ما لقيت إيموجي مميز بالرسالة. اختار من الإيموجيات'
+                ' المميزة (اللي بتظهر بحزم Premium) وأرسلها.')
+      return
+    mp = dict(pe_data()[0])
+    raw16 = message.text.encode('utf-16-le')
+    added = []
+    for e in ents:
+      base = raw16[e.offset * 2:(e.offset + e.length) * 2].decode('utf-16-le')
+      key = norm_emoji(base)
+      if key:
+        mp[key] = e.custom_emoji_id
+        added.append(key)
+    set_setting('pe_map', json.dumps(mp, ensure_ascii=False))
+    send_msg(message.chat.id,
+             f'✅ تم ربط {len(set(added))}: {" ".join(dict.fromkeys(added))}'
+             f'\nالمجموع: {len(mp)}. أرسل المزيد أو اضغط تم.')
 
   elif state == 'awaiting_sticker':
     stk = message.sticker
     if not stk:
-      bot.reply_to(message, '⚠️ أرسل ملصق (Sticker) تحديداً.')
+      reply_msg(message, '⚠️ أرسل ملصق (Sticker) تحديداً.')
       return
     set_setting(f'sticker_{data["slot"]}', stk.file_id)
     audit(message.from_user, 'ضبط ملصق', None, data['slot'])
     admin_input_states.pop(admin_id, None)
-    bot.reply_to(message, '✅ تم حفظ الملصق.')
+    reply_msg(message, '✅ تم حفظ الملصق.')
 
 
 # ==================== خطوات إدخال بيانات الطالب ====================
@@ -1482,7 +1681,7 @@ def handle_name(message):
   words = full_name.split(' ')
   if (not NAME_RE.match(full_name) or len(words) < 2 or len(full_name) < 6
       or len(full_name) > 60):
-    bot.send_message(
+    send_msg(
         message.chat.id,
         '⚠️ اكتب اسمك الثلاثي الكامل بالحروف فقط (بدون أرقام أو رموز).',
     )
@@ -1494,7 +1693,7 @@ def handle_name(message):
   )
   markup.add(kbtn('📱 مشاركة رقم الهاتف لتأكيد الهوية', request_contact=True,
                   style='primary'))
-  bot.send_message(
+  send_msg(
       message.chat.id,
       f'أهلاً بك يا {full_name}! 👋\n\n{progress_bar(1)}\n'
       '📱 الخطوة (2/4): يرجى الضغط على الزر أدناه لمشاركة رقم هاتفك المعتمد:',
@@ -1508,7 +1707,7 @@ def handle_phone(message):
     return
   user_id = message.from_user.id
   if message.contact.user_id != user_id:
-    bot.send_message(
+    send_msg(
         message.chat.id,
         '⚠️ تنبيه: يرجى مشاركة رقم الهاتف الخاص بحسابك الحالي حصراً بالضغط على'
         ' الزر.',
@@ -1516,10 +1715,10 @@ def handle_phone(message):
     return
   phone = clean_phone(message.contact.phone_number)
   if not (8 <= len(phone) <= 15):
-    bot.send_message(message.chat.id, '⚠️ رقم الهاتف غير صالح، جرّب مجدداً.')
+    send_msg(message.chat.id, '⚠️ رقم الهاتف غير صالح، جرّب مجدداً.')
     return
   save_session(user_id, step='ADMISSION_PHOTO', phone=phone)
-  bot.send_message(
+  send_msg(
       message.chat.id,
       f'✅ تم التحقق من رقم الهاتف بنجاح!\n\n{progress_bar(2)}\n'
       '📄 الخطوة (3/4): يرجى إرسال صورة بطاقة المفاضلة (التي تظهر اسمك وقبولك'
@@ -1534,7 +1733,7 @@ def handle_admission_photo(message):
   save_session(
       user_id, step='ID_PHOTO', admission_photo=message.photo[-1].file_id
   )
-  bot.send_message(
+  send_msg(
       message.chat.id,
       f'✅ تم استلام صورة المفاضلة بنجاح!\n\n{progress_bar(3)}\n'
       '🪪 الخطوة (4/4) والأخيرة: يرجى إرسال صورة البطاقة الشخصية (الهوية):',
@@ -1549,7 +1748,7 @@ def handle_id_photo(message):
   if not s or not s.get('name') or not s.get('phone') or not s.get(
       'admission_photo'):
     drop_session(user_id)
-    bot.send_message(message.chat.id, '⚠️ صار خلل بالجلسة، اكتب /start من جديد.')
+    send_msg(message.chat.id, '⚠️ صار خلل بالجلسة، اكتب /start من جديد.')
     return
   full_name, phone, admission_photo_id = (
       s['name'], s['phone'], s['admission_photo'])
@@ -1557,7 +1756,7 @@ def handle_id_photo(message):
   cur = q_one('SELECT status FROM freshmen WHERE telegram_id = ?', (user_id,))
   if cur and cur[0] in ('approved', 'pending', 'banned'):
     drop_session(user_id)
-    bot.send_message(
+    send_msg(
         message.chat.id,
         'ℹ️ حالة حسابك تغيّرت، اكتب /start لمعرفة وضعك الحالي.',
     )
@@ -1586,7 +1785,8 @@ def handle_id_photo(message):
   )
   drop_session(user_id)
 
-  bot.send_message(
+  send_sticker_slot(message.chat.id, 'submitted')
+  send_msg(
       message.chat.id,
       f'🚀 تم استلام بياناتك وأوراقك بنجاح!\n\n{progress_bar(4)}\n'
       'طلبك الآن قيد المراجعة والتدقيق، وسيصلك إشعار بالقبول مع روابط القنوات'
@@ -1617,7 +1817,7 @@ def handle_id_photo(message):
   )
 
   def send_to_admin(admin_id):
-    bot.send_photo(
+    send_photo_rich(
         admin_id,
         admission_photo_id,
         caption=(
@@ -1629,7 +1829,7 @@ def handle_id_photo(message):
             f'🔁 المحاولة رقم: {attempts}{dup_text}'
         ),
     )
-    bot.send_photo(
+    send_photo_rich(
         admin_id,
         id_photo_id,
         caption=f'🪪 (2/2 - صورة الهوية) للطالب: {full_name}\n👇 اتخذ القرار بضغطة زر:',
@@ -1655,7 +1855,7 @@ STEP_HINTS = {
 )
 def handle_wrong_input(message):
   step = session_step(message.from_user.id)
-  bot.send_message(
+  send_msg(
       message.chat.id,
       f'⚠️ هذا غير مطلوب الآن.\n{STEP_HINTS.get(step, "")}\n\nللإلغاء: /cancel',
   )
@@ -1668,10 +1868,10 @@ def manual_approve(message):
     return
   args = message.text.split()
   if len(args) < 2 or not args[1].strip().isdigit():
-    bot.reply_to(message, '⚠️ اكتب الأمر هكذا:\n/approve_manual TELEGRAM_ID')
+    reply_msg(message, '⚠️ اكتب الأمر هكذا:\n/approve_manual TELEGRAM_ID')
     return
   ok, msg = do_approve(int(args[1].strip()), message.from_user)
-  bot.reply_to(message, msg)
+  reply_msg(message, msg)
 
 
 # ==================== معالجة الأزرار ====================
@@ -1696,13 +1896,14 @@ def cb_mylinks(call):
     answer(call, '⚠️ حسابك غير موثّق.', True)
     return
   status, full_name, count = row
-  if (count or 0) >= MAX_LINK_REGEN:
-    answer(call, f'⛔ وصلت للحد الأقصى. تواصل مع {owner_tag()}.', True)
+  if MAX_LINK_REGEN <= 0 or (count or 0) >= MAX_LINK_REGEN:
+    answer(call, f'⛔ استخدمت طلب الروابط مسبقاً. تواصل مع {owner_tag()}.',
+           True)
     return
   answer(call, '⏳ جاري توليد روابط جديدة...')
   links, errors = generate_links(uid)
   if not links:
-    bot.send_message(call.message.chat.id,
+    send_msg(call.message.chat.id,
                      f'❌ تعذر توليد الروابط، تواصل مع {owner_tag()}.')
     return
   q_exec('UPDATE freshmen SET links_count = COALESCE(links_count, 0) + 1'
@@ -1726,7 +1927,7 @@ def cb_reject_reason(call, target_id, code):
     set_state(call.from_user.id, 'awaiting_reject_text', target=target_id,
               chat_id=call.message.chat.id,
               message_id=call.message.message_id)
-    bot.send_message(call.message.chat.id,
+    send_msg(call.message.chat.id,
                      '✍️ اكتب سبب الرفض ليتم إبلاغ الطالب فيه (أو /cancel):')
     answer(call)
     return
@@ -1800,7 +2001,7 @@ def cb_broadcast_confirm(call):
         failed += 1
       time.sleep(0.07)
     audit(actor, 'رسالة جماعية', None, f'نجح {sent} / فشل {failed}')
-    bot.send_message(admin_chat,
+    send_msg(admin_chat,
                      f'📣 انتهى الإرسال.\n✅ وصلت: {sent}\n❌ فشلت: {failed}')
 
   Thread(target=worker, daemon=True).start()
@@ -1818,6 +2019,7 @@ def settings_markup():
       btn('👤 يوزر المسؤول', 'set_owner'),
       btn('📡 القنوات والمجموعات', 'set_channels', style='primary'),
       btn('👥 الأدمنية', 'set_admins'),
+      btn('🌟 الإيموجي المميز (Premium)', 'set_pe', style='primary'),
       btn('🎭 الملصقات', 'set_stickers'),
       btn(f'📎 Excel تلقائي مع كل قبول: {"✅ مفعّل" if auto else "⛔ موقّف"}',
           'set_autoxl', style='success' if auto else 'danger'),
@@ -1866,8 +2068,8 @@ def admins_view(call):
 
 
 def stickers_view(call):
-  slots = [('welcome', '👋 ملصق الترحيب'), ('approved', '🎉 ملصق القبول'),
-           ('rejected', '😢 ملصق الرفض')]
+  slots = [('welcome', '👋 ملصق الترحيب'), ('submitted', '🚀 ملصق استلام الطلب'),
+           ('approved', '🎉 ملصق القبول'), ('rejected', '😢 ملصق الرفض')]
   m = types.InlineKeyboardMarkup(row_width=1)
   for slot, label in slots:
     on = '✅' if get_setting(f'sticker_{slot}') else '➖'
@@ -1877,30 +2079,91 @@ def stickers_view(call):
   show(call, '🎭 اختر خانة ثم أرسل لي الملصق اللي بدك ياه:', m)
 
 
+def premium_view(call):
+  mp, _ = pe_data()
+  on = get_setting('premium_mode', 'on') == 'on'
+  lines = ['🌟 الإيموجي المميز (Premium)\n']
+  lines.append(f'الحالة: {"✅ مفعّل" if on else "⛔ موقّف"}')
+  lines.append(f'عدد الإيموجيات المربوطة: {len(mp)}')
+  if mp:
+    lines.append(' '.join(mp.keys()))
+  if PREMIUM_BROKEN['on']:
+    lines.append('\n⚠️ تيليجرام رفض الإيموجي المميز فتم إيقافه مؤقتاً. تأكد أن'
+                 ' حساب صاحب البوت (اللي أنشأه من BotFather) عليه Premium، ثم'
+                 ' اضغط "إعادة المحاولة".')
+    lines.append(f'السبب: {PREMIUM_BROKEN["reason"]}')
+  m = types.InlineKeyboardMarkup(row_width=1)
+  m.add(
+      btn('➕ إضافة/تحديث إيموجيات مميزة', 'set_pe_add', style='success'),
+      btn('👁 معاينة', 'set_pe_prev'),
+      btn(f'⚙️ التفعيل: {"✅" if on else "⛔"} (اضغط للتبديل)', 'set_pe_toggle'),
+  )
+  if PREMIUM_BROKEN['on']:
+    m.add(btn('🔄 إعادة المحاولة', 'set_pe_retry', style='primary'))
+  m.add(btn('🗑 حذف كل الربط', 'set_pe_clear', style='danger'),
+        btn('🔙 رجوع', 'admin_settings'))
+  show(call, '\n'.join(lines), m)
+
+
 def cb_settings(call, data):
   uid = call.from_user.id
-  if data == 'admin_settings':
+  if data == 'set_pe':
+    premium_view(call)
+  elif data == 'set_pe_add':
+    set_state(uid, 'awaiting_premium_emoji')
+    m = types.InlineKeyboardMarkup().add(btn('✅ تم', 'set_pe_done',
+                                              style='success'))
+    send_msg(
+        call.message.chat.id,
+        '🌟 أرسل لي رسالة (أو عدة رسائل) فيها الإيموجيات المميزة اللي بدك'
+        ' ياها.\nكل إيموجي مميز بيتربط تلقائياً بالإيموجي العادي المقابل له،'
+        ' فمثلاً إيموجي 🎉 مميز بيحل محل كل 🎉 بالبوت.\n\n'
+        f'📌 الإيموجيات المستخدمة بالبوت:\n{BOT_EMOJIS}\n\n'
+        'لما تخلص اضغط تم (أو /cancel).',
+        reply_markup=m,
+    )
+  elif data == 'set_pe_done':
+    admin_input_states.pop(uid, None)
+    premium_view(call)
+  elif data == 'set_pe_prev':
+    mp, _ = pe_data()
+    if not mp:
+      answer(call, 'ما في إيموجيات مربوطة بعد.', True)
+      return
+    send_msg(call.message.chat.id, 'معاينة: ' + ' '.join(mp.keys()))
+  elif data == 'set_pe_toggle':
+    set_setting('premium_mode',
+                'off' if get_setting('premium_mode', 'on') == 'on' else 'on')
+    premium_view(call)
+  elif data == 'set_pe_retry':
+    PREMIUM_BROKEN.update(on=False, reason='')
+    premium_view(call)
+  elif data == 'set_pe_clear':
+    set_setting('pe_map', '')
+    premium_view(call)
+  elif data == 'admin_settings':
+
     show(call, settings_text(), settings_markup())
   elif data == 'set_branch':
     set_state(uid, 'awaiting_branch')
-    bot.send_message(call.message.chat.id,
+    send_msg(call.message.chat.id,
                      '🏷 اكتب اسم الفرع الجديد (أو /cancel):')
   elif data == 'set_owner':
     set_state(uid, 'awaiting_owner')
-    bot.send_message(call.message.chat.id,
+    send_msg(call.message.chat.id,
                      '👤 اكتب يوزر المسؤول بدون مسافات (أو /cancel):')
   elif data == 'set_channels':
     channels_view(call)
   elif data == 'set_ch_add':
     set_state(uid, 'awaiting_ch_add')
-    bot.send_message(
+    send_msg(
         call.message.chat.id,
         '➕ حوّل لي أي رسالة من القناة/المجموعة، أو أرسل الـ ID تبعها.\n'
         '⚠️ لازم يكون البوت مشرف فيها مع صلاحية Invite Users.\n(أو /cancel)',
     )
   elif data.startswith('set_chren_'):
     set_state(uid, 'awaiting_ch_rename', id=int(data.rsplit('_', 1)[1]))
-    bot.send_message(call.message.chat.id, '✏️ اكتب الاسم الجديد (أو /cancel):')
+    send_msg(call.message.chat.id, '✏️ اكتب الاسم الجديد (أو /cancel):')
   elif data.startswith('set_chdely_'):
     cid = int(data.rsplit('_', 1)[1])
     q_exec('DELETE FROM channels WHERE id = ?', (cid,))
@@ -1933,7 +2196,7 @@ def cb_settings(call, data):
       answer(call, '⚠️ للأدمن الأساسي فقط.', True)
       return
     set_state(uid, 'awaiting_admin_add')
-    bot.send_message(call.message.chat.id,
+    send_msg(call.message.chat.id,
                      '➕ أرسل Telegram ID للأدمن الجديد أو حوّل رسالة منه.')
   elif data.startswith('set_adm_del_'):
     if not is_super_admin(uid):
@@ -1955,13 +2218,13 @@ def cb_settings(call, data):
   elif data == 'set_stickers':
     stickers_view(call)
   elif data == 'set_stk_clear':
-    for slot in ('welcome', 'approved', 'rejected'):
+    for slot in ('welcome', 'submitted', 'approved', 'rejected'):
       set_setting(f'sticker_{slot}', '')
     stickers_view(call)
   elif data.startswith('set_stk_'):
     slot = data.rsplit('_', 1)[1]
     set_state(uid, 'awaiting_sticker', slot=slot)
-    bot.send_message(call.message.chat.id, '🎭 أرسل الملصق الآن (أو /cancel):')
+    send_msg(call.message.chat.id, '🎭 أرسل الملصق الآن (أو /cancel):')
   answer(call)
 
 
@@ -1992,12 +2255,12 @@ def callback_router(call):
       return cb_archive(call, status, int(page))
     if data == 'admin_search':
       set_state(uid, 'awaiting_search')
-      bot.send_message(call.message.chat.id,
+      send_msg(call.message.chat.id,
                        '🔍 اكتب اسم الطالب أو رقم هاتفه أو Telegram ID (أو /cancel):')
       return answer(call)
     if data == 'admin_reset':
       set_state(uid, 'awaiting_reset')
-      bot.send_message(call.message.chat.id,
+      send_msg(call.message.chat.id,
                        '🔓 أرسل رقم هاتف الطالب أو Telegram ID لفك القفل عنه (أو /cancel):')
       return answer(call)
     if data in ('admin_export', 'admin_export_all'):
@@ -2011,7 +2274,7 @@ def callback_router(call):
       return
     if data == 'admin_broadcast':
       set_state(uid, 'awaiting_broadcast')
-      bot.send_message(
+      send_msg(
           call.message.chat.id,
           '📣 أرسل الرسالة اللي بدك توصل لكل الطلاب المقبولين (نص/صورة/ملف)،'
           ' أو /cancel:')
@@ -2062,7 +2325,7 @@ def callback_router(call):
     func=lambda m: m.chat.type == 'private' and not is_admin(m.from_user.id),
 )
 def fallback(message):
-  bot.send_message(message.chat.id, 'اكتب /start للبدء بالتوثيق 👋')
+  send_msg(message.chat.id, 'اكتب /start للبدء بالتوثيق 👋')
 
 
 # ==================== التشغيل ====================
