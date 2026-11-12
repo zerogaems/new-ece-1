@@ -525,8 +525,7 @@ STICKER_SLOTS = [
     ('welcome', 'STICKER_WELCOME', '👋 الترحيب'),
     ('p25', 'STICKER_PROGRESS_25', '25% (بعد الاسم)'),
     ('p50', 'STICKER_PROGRESS_50', '50% (بعد رقم الهاتف)'),
-    ('p75', 'STICKER_PROGRESS_75', '75% (بعد صورة المفاضلة)'),
-    ('p100', 'STICKER_PROGRESS_100', '100% (بعد صورة الهوية)'),
+    ('p100', 'STICKER_PROGRESS_100', '100% (بعد صورة المفاضلة)'),
     ('approved', 'STICKER_APPROVED', '🎉 القبول'),
     ('rejected', 'STICKER_REJECTED', '😢 الرفض'),
 ]
@@ -740,6 +739,8 @@ def load_sessions():
   for tid, step, name, phone, adm in q_all(
       'SELECT telegram_id, step, name, phone, admission_photo_id FROM sessions'
   ):
+    if step == 'ID_PHOTO':  # جلسة قديمة كانت عالقة بخطوة الهوية (انحذفت)
+      step, adm = 'ADMISSION_PHOTO', None
     sessions[int(tid)] = {
         'step': step, 'name': name, 'phone': phone, 'admission_photo': adm
     }
@@ -1047,10 +1048,10 @@ def auto_excel_after_approval(full_name):
 
 
 def export_photos_zip(chat_id):
-  """يجمع صور الهوية والمفاضلة للمقبولين بملف/ملفات ZIP (للتقديم للجامعة)."""
+  """يجمع صور المفاضلة للمقبولين بملف/ملفات ZIP (للتقديم للجامعة)."""
   try:
     rows = q_all(
-        'SELECT full_name, phone, admission_photo_id, id_photo_id FROM'
+        'SELECT full_name, phone, admission_photo_id FROM'
         " freshmen WHERE status = 'approved' ORDER BY"
         ' COALESCE(approved_at, created_at), full_name'
     )
@@ -1073,7 +1074,7 @@ def export_photos_zip(chat_id):
                 io.BytesIO(state['buf'].getvalue()),
                 file_name=f"Freshmen_Photos_part{state['part']}.zip",
             ),
-            caption=f"🗂 صور الهويات والمفاضلة — جزء {state['part']}",
+            caption=f"🗂 صور المفاضلة — جزء {state['part']}",
         )
       if not last:
         state['part'] += 1
@@ -1081,9 +1082,9 @@ def export_photos_zip(chat_id):
         state['buf'] = io.BytesIO()
         state['zf'] = zipfile.ZipFile(state['buf'], 'w', zipfile.ZIP_STORED)
 
-    for i, (name, phone, adm, idp) in enumerate(rows, 1):
+    for i, (name, phone, adm) in enumerate(rows, 1):
       folder = f'{i:03d}_{safe_filename(name)}'
-      for label, file_id in (('ID_الهوية', idp), ('المفاضلة', adm)):
+      for label, file_id in (('المفاضلة', adm),):
         if not file_id:
           continue
         try:
@@ -1303,7 +1304,7 @@ def student_actions_markup(tid, status):
 
 def send_student_file(chat_id, tid):
   row = q_one(
-      'SELECT full_name, phone, username, admission_photo_id, id_photo_id,'
+      'SELECT full_name, phone, username, admission_photo_id,'
       ' status, created_at, attempts, approved_by, approved_at, reject_reason'
       ' FROM freshmen WHERE telegram_id = ?',
       (tid,),
@@ -1311,7 +1312,7 @@ def send_student_file(chat_id, tid):
   if not row:
     send_msg(chat_id, '❌ سجل الطالب غير موجود.')
     return
-  (full_name, phone, username, adm, idp, status, created, attempts,
+  (full_name, phone, username, adm, status, created, attempts,
    appr_by, appr_at, reason) = row
   info = (
       f'📁 {B("مجلد الطالب الرقمي:")}\n\n'
@@ -1328,16 +1329,11 @@ def send_student_file(chat_id, tid):
   if reason and status == 'rejected':
     info += f'\n📝 سبب الرفض: {reason}'
   send_msg(chat_id, info)
+  markup = student_actions_markup(tid, status)
   if adm:
     try:
-      send_photo_rich(chat_id, adm, caption=f'📄 صورة المفاضلة: {full_name}')
-    except Exception:
-      pass
-  markup = student_actions_markup(tid, status)
-  if idp:
-    try:
       send_photo_rich(
-          chat_id, idp, caption=f'🪪 صورة الهوية: {full_name}',
+          chat_id, adm, caption=f'📄 صورة المفاضلة: {full_name}',
           reply_markup=markup,
       )
       return
@@ -1473,9 +1469,8 @@ def do_reject(target_id, admin_user, reason_text):
 
 
 REJECT_REASONS = {
-    '1': '📷 الصور المرفقة غير واضحة، يرجى إعادة التصوير بشكل جلي والإرسال مجدداً.',
+    '1': '📷 الصورة المرفقة غير واضحة، يرجى إعادة التصوير بشكل جلي والإرسال مجدداً.',
     '2': '📄 بطاقة المفاضلة المرفقة لا توضح القبول في قسم الهندسة الإلكترونية والاتصالات.',
-    '3': '🪪 صورة الهوية الشخصية غير واضحة أو غير مطابقة للبيانات.',
 }
 
 
@@ -1484,7 +1479,6 @@ def reject_menu_markup(target_id):
   m.add(
       btn('📷 الصورة غير واضحة', f'reject_reason_{target_id}_1'),
       btn('📄 المفاضلة لا تحتوي القسم', f'reject_reason_{target_id}_2'),
-      btn('🪪 صورة الهوية غير مطابقة', f'reject_reason_{target_id}_3'),
       btn('✍️ سبب آخر (أكتبه)', f'reject_reason_{target_id}_c',
           style='primary'),
       btn('↩️ تراجع', f'view_file_{target_id}'),
@@ -1494,7 +1488,7 @@ def reject_menu_markup(target_id):
 
 # ==================== بدء التسجيل للمستجدين ====================
 def progress_step(chat_id, pct):
-  """ملصق التقدم (25/50/75/100). إذا ما في ملصق مضبوط بيرجع سطر نسبة مئوية."""
+  """ملصق التقدم (25/50/100). إذا ما في ملصق مضبوط بيرجع سطر نسبة مئوية."""
   if send_sticker_slot(chat_id, f'p{pct}'):
     return ''
   return f'\n\n{B("📊 " + str(pct) + "%")}'
@@ -1539,7 +1533,7 @@ def begin_registration_flow(user_id, chat_id):
       f'( بَرمَجَ هذا البوت {owner_tag()} ✔️ )\n\n'
       'للانضمام لقناة ومجموعة السنة الأولى، يرجى إكمال خطوات التوثيق للتأكد'
       ' من قبولك بالقسم.\n\n'
-      f'✍️ {B("الخطوة (1/4):")} يرجى كتابة اسمك الثلاثي الكامل:'
+      f'✍️ {B("الخطوة (1/3):")} يرجى كتابة اسمك الثلاثي الكامل:'
   )
   send_msg(chat_id, welcome_text, reply_markup=types.ReplyKeyboardRemove())
 
@@ -1839,7 +1833,7 @@ def handle_name(message):
   send_msg(
       message.chat.id,
       f'أهلاً بك يا {B(full_name)}! 👋{extra}\n\n'
-      f'📱 {B("الخطوة (2/4):")} يرجى الضغط على الزر أدناه لمشاركة رقم هاتفك'
+      f'📱 {B("الخطوة (2/3):")} يرجى الضغط على الزر أدناه لمشاركة رقم هاتفك'
       ' المعتمد:',
       reply_markup=markup,
   )
@@ -1866,7 +1860,7 @@ def handle_phone(message):
   send_msg(
       message.chat.id,
       f'✅ {B("تم التحقق من رقم الهاتف بنجاح!")}{extra}\n\n'
-      f'📄 {B("الخطوة (3/4):")} يرجى إرسال صورة بطاقة المفاضلة (التي تظهر'
+      f'📄 {B("الخطوة (3/3) والأخيرة:")} يرجى إرسال صورة بطاقة المفاضلة (التي تظهر'
       ' اسمك وقبولك في القسم):',
       reply_markup=types.ReplyKeyboardRemove(),
   )
@@ -1875,28 +1869,12 @@ def handle_phone(message):
 @bot.message_handler(content_types=['photo'], func=in_step('ADMISSION_PHOTO'))
 def handle_admission_photo(message):
   user_id = message.from_user.id
-  save_session(
-      user_id, step='ID_PHOTO', admission_photo=message.photo[-1].file_id
-  )
-  extra = progress_step(message.chat.id, 75)
-  send_msg(
-      message.chat.id,
-      f'✅ {B("تم استلام صورة المفاضلة بنجاح!")}{extra}\n\n'
-      f'🪪 {B("الخطوة (4/4) والأخيرة:")} يرجى إرسال صورة البطاقة الشخصية'
-      ' (الهوية):',
-  )
-
-
-@bot.message_handler(content_types=['photo'], func=in_step('ID_PHOTO'))
-def handle_id_photo(message):
-  user_id = message.from_user.id
-  id_photo_id = message.photo[-1].file_id
   s = sessions.get(user_id)
-  if not s or not s.get('name') or not s.get('phone') or not s.get(
-      'admission_photo'):
+  if not s or not s.get('name') or not s.get('phone'):
     drop_session(user_id)
     send_msg(message.chat.id, '⚠️ صار خلل بالجلسة، اكتب /start من جديد.')
     return
+  s['admission_photo'] = message.photo[-1].file_id
   full_name, phone, admission_photo_id = (
       s['name'], s['phone'], s['admission_photo'])
 
@@ -1913,22 +1891,20 @@ def handle_id_photo(message):
   now = now_utc_str()
   q_exec(
       'INSERT INTO freshmen (telegram_id, full_name, phone, username,'
-      ' admission_photo_id, id_photo_id, status, attempts, updated_at)'
-      " VALUES (?, ?, ?, ?, ?, ?, 'pending', 1, ?) ON CONFLICT(telegram_id)"
+      ' admission_photo_id, status, attempts, updated_at)'
+      " VALUES (?, ?, ?, ?, ?, 'pending', 1, ?) ON CONFLICT(telegram_id)"
       ' DO UPDATE SET full_name = excluded.full_name, phone ='
       ' excluded.phone, username = excluded.username, admission_photo_id ='
-      ' excluded.admission_photo_id, id_photo_id = excluded.id_photo_id,'
+      ' excluded.admission_photo_id, id_photo_id = NULL,'
       " status = 'pending', attempts = COALESCE(freshmen.attempts, 0) + 1,"
       ' updated_at = excluded.updated_at, reject_reason = NULL, approved_by'
       ' = NULL, approved_at = NULL',
-      (user_id, full_name, phone, username, admission_photo_id, id_photo_id,
-       now),
+      (user_id, full_name, phone, username, admission_photo_id, now),
   )
   q_exec(
       'INSERT INTO submissions (telegram_id, full_name, phone,'
-      ' admission_photo_id, id_photo_id, submitted_at) VALUES (?, ?, ?, ?, ?,'
-      ' ?)',
-      (user_id, full_name, phone, admission_photo_id, id_photo_id, now),
+      ' admission_photo_id, submitted_at) VALUES (?, ?, ?, ?, ?)',
+      (user_id, full_name, phone, admission_photo_id, now),
   )
   drop_session(user_id)
 
@@ -1968,18 +1944,14 @@ def handle_id_photo(message):
         admin_id,
         admission_photo_id,
         caption=(
-            f'📥 {B("طلب توثيق مستجد جديد (1/2 - المفاضلة):")}\n\n'
+            f'📥 {B("طلب توثيق مستجد جديد:")}\n\n'
             f'👤 الاسم: {full_name}\n'
             f'📱 الهاتف: {phone}\n'
             f'🆔 Telegram ID: {user_id}\n'
             f'👤 المعرف: {username_str}\n'
-            f'🔁 المحاولة رقم: {attempts}{dup_text}'
+            f'🔁 المحاولة رقم: {attempts}{dup_text}\n\n'
+            '👇 اتخذ القرار بضغطة زر:'
         ),
-    )
-    send_photo_rich(
-        admin_id,
-        id_photo_id,
-        caption=f'🪪 (2/2 - صورة الهوية) للطالب: {full_name}\n👇 اتخذ القرار بضغطة زر:',
         reply_markup=markup,
     )
 
@@ -1990,7 +1962,6 @@ STEP_HINTS = {
     'NAME': '✍️ اكتب اسمك الثلاثي كنص.',
     'PHONE': '📱 اضغط زر "مشاركة رقم الهاتف" الظاهر تحت.',
     'ADMISSION_PHOTO': '📄 أرسل صورة بطاقة المفاضلة كـ صورة (Photo) وليس ملف.',
-    'ID_PHOTO': '🪪 أرسل صورة الهوية كـ صورة (Photo) وليس ملف.',
 }
 
 
